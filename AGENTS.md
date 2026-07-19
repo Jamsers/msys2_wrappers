@@ -1,19 +1,30 @@
 # msys2_wrappers
 
-Small C wrappers that launch MSYS2 bash from a convenient `.exe`.
+Tiny `.exe` wrappers that launch MSYS2 `bash --login` with the correct `MSYSTEM` env var — no mintty, no new window, no `.bat`/`.cmd` script.
 
-## Architecture
+## How it works
 
-- `ucrt64_shell_wrapper.c` and `msys_shell_wrapper.c` are thin stubs that `#include "shell_wrapper.c"` after `#define`-ing `PROGRAM_NAME` and `MSYSTEM_VALUE` — they are **not** independent compilation units.
-- `shell_wrapper.c` finds `<exe_dir>\usr\bin\bash.exe`, sets `MSYSTEM` and `CHERE_INVOKING` env vars, then launches `bash --login` forwarding all arguments.
-- The only difference between the two wrappers is the `MSYSTEM` value (`UCRT64` vs `MSYS`).
+- `ucrt64_shell_wrapper.c` and `msys_shell_wrapper.c` are 3-line stubs that `#include "shell_wrapper.c"` after `#define`-ing `PROGRAM_NAME` and `MSYSTEM_VALUE`.
+- `shell_wrapper.c` (shared) finds `<exe_dir>\usr\bin\bash.exe`, sets `MSYSTEM` and `CHERE_INVOKING`, and launches `bash --login` forwarding all args via `CreateProcessW`. Propagates exit code.
+
+## Adding a new environment
+
+Create a 3-line `.c` file:
+```c
+#define PROGRAM_NAME L"mingw64_shell_wrapper"
+#define MSYSTEM_VALUE L"MINGW64"
+#include "shell_wrapper.c"
+```
+Then add a `cl` line to `build.cmd`.
 
 ## Build
 
-- Requires MSVC (VS 2019, v18). Run `build.cmd` from a Developer Command Prompt, or from any shell after calling `vcvars64.bat`.
-- Produces `ucrt64_shell_wrapper.exe` and `msys_shell_wrapper.exe`.
-- Flags: `/O1 /MD /GL /W4 /link /LTCG`.
+- Requires MSVC. Run `build.cmd` from a **VS Developer Command Prompt**, or from any shell after sourcing `vcvars64.bat`.
+- The VS path in `build.cmd` (`VS\18`) is version-specific — adjust if needed.
+- Flags: `cl /nologo /O1 /MD /GL /W4 /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib`
+- Outputs are gitignored (`*.exe`) — you always need to build locally.
 
 ## Notable
 
-- No README, no tests, no CI, no `.gitignore`.
+- No test suite — verify by running the produced `.exe` from a terminal.
+- No CI.
