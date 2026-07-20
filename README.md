@@ -69,11 +69,13 @@ Failures write a diagnostic to stderr.
 
 ## Build
 
-Requires MSVC (Visual Studio). Open a **Developer Command Prompt for VS 2022+** and run:
+Requires MSVC (Visual Studio). Run from a **Developer Command Prompt for VS 2022+**:
 
 ```
 build.cmd
 ```
+
+> **Note:** `build.cmd` has the VS path hardcoded as `C:\Program Files\Microsoft Visual Studio\18\...`. If your VS version or install path differs, adjust the `call` line in it to match your `vcvars64.bat`.
 
 This compiles all wrappers and the test binary.
 
