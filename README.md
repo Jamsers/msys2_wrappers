@@ -2,11 +2,11 @@
 
 Tiny `.exe` shell wrappers for MSYS2 environments — drop them in `C:\msys64` and point your IDE or terminal at them.
 
-No mintty, no new window, no `.bat`/`.cmd` scripts that IDEs refuse to accept. Just a proper console executable that launches `bash --login` with the correct MSYSTEM environment.
+No mintty, no new window, no `.bat`/`.cmd` scripts that IDEs refuse to accept. Just a proper console executable that launches `bash --login` with the correct `MSYSTEM` environment.
 
 ## Why?
 
-MSYS2 ships with `ucrt64.exe`, `mingw64.exe`, etc., but those launch **mintty** (a new terminal window). Tools like VS Code, CLion, and agentic harnesses need a shell that runs in-place in their integrated terminal. They also won't accept a `.cmd` or `.bat` as a shell.
+MSYS2 ships with `ucrt64.exe`, `clang64.exe`, `mingw64.exe`, etc., but those launch **mintty** (a new terminal window). Tools like VS Code, CLion, and agentic harnesses need a shell that runs in-place in their integrated terminal. They also won't accept a `.cmd` or `.bat` as a shell.
 
 These wrappers are the equivalent of running:
 
@@ -18,7 +18,7 @@ but as a proper console `.exe`.
 
 ## Usage
 
-Drop `ucrt64_shell_wrapper.exe` and/or `msys_shell_wrapper.exe` into `C:\msys64`.
+Drop the `.exe`(s) for the environments you need into `C:\msys64`.
 
 ### VS Code
 
@@ -26,6 +26,9 @@ Drop `ucrt64_shell_wrapper.exe` and/or `msys_shell_wrapper.exe` into `C:\msys64`
 "terminal.integrated.profiles.windows": {
     "UCRT64": {
         "path": "C:\\msys64\\ucrt64_shell_wrapper.exe"
+    },
+    "CLANG64": {
+        "path": "C:\\msys64\\clang64_shell_wrapper.exe"
     },
     "MSYS": {
         "path": "C:\\msys64\\msys_shell_wrapper.exe"
@@ -58,7 +61,7 @@ Add a profile:
 Each wrapper:
 
 1. Finds `usr\bin\bash.exe` relative to its own location
-2. Sets `MSYSTEM=UCRT64` (or `MSYS`) and `CHERE_INVOKING=enabled_from_arguments`
+2. Sets `MSYSTEM` to the appropriate value (`UCRT64`, `CLANG64`, `MSYS`, etc.) and `CHERE_INVOKING=enabled_from_arguments`
 3. Launches `bash --login` in the current console, passing through all arguments
 4. Propagates the exit code
 
@@ -72,15 +75,28 @@ Requires MSVC (Visual Studio). Open a **Developer Command Prompt for VS 2022+** 
 build.cmd
 ```
 
+This compiles all wrappers and the test binary.
+
 Or from PowerShell:
 
 ```powershell
 & "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
 cl /nologo /O1 /MD /GL /W4 ucrt64_shell_wrapper.c /Fe:ucrt64_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
+cl /nologo /O1 /MD /GL /W4 clang64_shell_wrapper.c /Fe:clang64_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
 cl /nologo /O1 /MD /GL /W4 msys_shell_wrapper.c /Fe:msys_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
 ```
 
 Each binary is ~12KB.
+
+## Tests
+
+```bash
+# C quoting unit tests (roundtrip through CommandLineToArgvW)
+test_quoting.exe
+
+# Integration tests (env, exit codes, arg passthrough)
+bash test_wrapper.sh
+```
 
 ## Adding other environments
 
@@ -100,5 +116,8 @@ Then compile it.
 |------|---------|
 | `shell_wrapper.c` | Common implementation (140 lines) |
 | `ucrt64_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=UCRT64` |
+| `clang64_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=CLANG64` |
 | `msys_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=MSYS` |
-| `build.cmd` | One-liner to rebuild both |
+| `test_quoting.c` | C unit tests for quoting logic |
+| `test_wrapper.sh` | Integration tests |
+| `build.cmd` | One-liner to rebuild all |
