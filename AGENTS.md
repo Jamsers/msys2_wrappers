@@ -4,7 +4,7 @@ Tiny `.exe` wrappers that launch MSYS2 `bash --login` with the correct `MSYSTEM`
 
 ## Architecture
 
-Each wrapper is a 3-line `.c` stub (`#define PROGRAM_NAME` + `#define MSYSTEM_VALUE` + `#include "shell_wrapper.c"`). The shared `shell_wrapper.c` finds `<exe_dir>\usr\bin\bash.exe`, sets `MSYSTEM` and `CHERE_INVOKING`, and launches `bash --login` forwarding the raw argument tail verbatim via `CreateProcessW` (skips argv0 with `skip_argv0` from `quoting.h`, no re-parsing). Exit code is propagated; a Job Object with kill-on-close ensures bash dies with the wrapper.
+Each wrapper is a 3-line `.c` stub (`#define PROGRAM_NAME` + `#define MSYSTEM_VALUE` + `#include "shell_wrapper.c"`). The shared `shell_wrapper.c` finds `<exe_dir>\usr\bin\bash.exe`, sets `MSYSTEM` and `CHERE_INVOKING`, and launches `bash --login` via `CreateProcessW`, skipping argv0 with `skip_argv0` from `quoting.h`, re-parsing the tail with `CommandLineToArgvW` (empty tail = zero user args), and re-quoting every arg (always double-quoted, so MSYS/Cygwin's parser can't glob `*?[]` or strip `'`/`~`). Exit code is propagated; a Job Object with kill-on-close ensures bash dies with the wrapper.
 
 Wrappers exist for: `UCRT64`, `CLANG64`, `MSYS`.
 

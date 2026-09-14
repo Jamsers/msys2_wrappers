@@ -17,20 +17,34 @@ UCRT64="$MSYS2_ROOT/ucrt64_shell_wrapper.exe"
 CLANG64="$MSYS2_ROOT/clang64_shell_wrapper.exe"
 MSYS="$MSYS2_ROOT/msys_shell_wrapper.exe"
 
+# Temp dirs created by tests; cleaned up on exit (success or abort).
+GLOB_DIR=""; SPACED_TMP=""; CWD_DIR=""; MISSING_DIR=""; DIRBAIT=""
+cleanup() {
+    [ -n "$GLOB_DIR" ] && rm -rf "$GLOB_DIR"
+    [ -n "$SPACED_TMP" ] && rm -rf "$SPACED_TMP"
+    [ -n "$CWD_DIR" ] && rmdir "$CWD_DIR" 2>/dev/null
+    [ -n "$MISSING_DIR" ] && rm -rf "$MISSING_DIR"
+    [ -n "$DIRBAIT" ] && rm -rf "$DIRBAIT"
+}
+trap cleanup EXIT
+
+deploy_failed() {
+    echo "ERROR: cannot copy $1 to $MSYS2_ROOT/" >&2
+    echo "HINT: if the error is 'Device or resource busy', a running process is" >&2
+    echo "holding the installed wrapper (e.g. this very shell was launched via it)." >&2
+    echo "Close shells/IDEs using the wrappers and retry, or test against a copy" >&2
+    echo "of the MSYS2 tree:  MSYS2_ROOT=/path/to/copy bash test_wrapper.sh" >&2
+    exit 1
+}
+
 # Deploy wrappers to where bash lives (they find bash relative to themselves).
 # Checked: never silently test a stale installed copy.
-cp "$WRAPPER_DIR/ucrt64_shell_wrapper.exe" "$MSYS2_ROOT/" || {
-    echo "ERROR: cannot copy ucrt64_shell_wrapper.exe to $MSYS2_ROOT/" >&2
-    exit 1
-}
-cp "$WRAPPER_DIR/clang64_shell_wrapper.exe" "$MSYS2_ROOT/" || {
-    echo "ERROR: cannot copy clang64_shell_wrapper.exe to $MSYS2_ROOT/" >&2
-    exit 1
-}
-cp "$WRAPPER_DIR/msys_shell_wrapper.exe" "$MSYS2_ROOT/" || {
-    echo "ERROR: cannot copy msys_shell_wrapper.exe to $MSYS2_ROOT/" >&2
-    exit 1
-}
+cp "$WRAPPER_DIR/ucrt64_shell_wrapper.exe" "$MSYS2_ROOT/" \
+    || deploy_failed ucrt64_shell_wrapper.exe
+cp "$WRAPPER_DIR/clang64_shell_wrapper.exe" "$MSYS2_ROOT/" \
+    || deploy_failed clang64_shell_wrapper.exe
+cp "$WRAPPER_DIR/msys_shell_wrapper.exe" "$MSYS2_ROOT/" \
+    || deploy_failed msys_shell_wrapper.exe
 
 PASS=0
 FAIL=0
@@ -55,19 +69,46 @@ check_exe "$CLANG64"
 check_exe "$MSYS"
 
 # Compare wrapper passthrough against direct bash for the same argv.
-# Guard: direct bash MUST deliver argv byte-identical (proving the argv itself
-# is valid). Only then is wrapper-vs-direct compared.
+# The `_` is the $0 placeholder: with `bash -c CMD`, the first arg after
+# the command string becomes $0 (NOT $@), so omitting it makes both sides
+# print nothing and the comparison vacuous. The guard then asserts the
+# direct run actually delivered the arg before trusting the comparison.
 check_passthrough() {
     local desc="$1"; shift
-    local wrapped direct
-    direct=$("$BASH" --login -c 'printf "[%s]" "$@"' "$@" 2>&1)
-    wrapped=$("$UCRT64" -c 'printf "[%s]" "$@"' "$@" 2>&1)
+    local wrapped direct expected
+    expected=$(printf '[%s]' "$@")
+    direct=$("$BASH" --login -c 'printf "[%s]" "$@"' _ "$@" 2>&1)
+    wrapped=$("$UCRT64" -c 'printf "[%s]" "$@"' _ "$@" 2>&1)
+    if [ "$direct" != "$expected" ]; then
+        fail "$desc: TEST BUG -- direct bash delivered '$direct', expected '$expected'"
+        return
+    fi
     if [ "$wrapped" = "$direct" ]; then
         pass "$desc"
     else
         fail "$desc: wrapper='$wrapped' direct='$direct'"
     fi
 }
+
+# ---------------------------------------------------------------------------
+bold "=== Bare invocation (no args) ==="
+
+# Test: wrapper with zero args must launch an interactive-style login shell,
+# NOT forward a bogus script path (regression: CommandLineToArgvW("") yields
+# argc=1 with the exe path, which bash tried to execute -> exit 126).
+result=$(printf 'echo BARE_OK\nexit 0\n' | "$UCRT64" 2>/dev/null)
+if [ "$result" = "BARE_OK" ]; then
+    pass "bare invocation runs login shell from stdin"
+else
+    fail "bare invocation: got '$result', expected 'BARE_OK'"
+fi
+
+result=$("$UCRT64" -l -c 'echo "$MSYSTEM"' </dev/null 2>/dev/null)
+if [ "$result" = "UCRT64" ]; then
+    pass "-l flag style invocation"
+else
+    fail "-l flag style invocation: got '$result'"
+fi
 
 # ---------------------------------------------------------------------------
 bold "=== Environment ==="
@@ -189,19 +230,29 @@ check_passthrough "newline passes through" "$(printf 'a\nb')"
 check_passthrough "unicode passes through" 'héllo-日本語'
 popd >/dev/null
 rm -rf "$GLOB_DIR"
+GLOB_DIR=""
 
-# Test 15: wrapper path with spaces (symlink, avoids copying bash tree)
-SPACED_BASE=$(mktemp -d)/"dir with spaces"
+# Test 15: wrapper path with spaces (copy, so GetModuleFileNameW sees the
+# spaced path; MSYS ln -s on .exe files copies anyway).
+SPACED_TMP=$(mktemp -d)
+SPACED_BASE="$SPACED_TMP/dir with spaces"
 mkdir -p "$SPACED_BASE/usr/bin"
-ln -s "$BASH" "$SPACED_BASE/usr/bin/bash.exe"
-ln -s "$UCRT64" "$SPACED_BASE/ucrt64_shell_wrapper.exe"
+cp "$BASH" "$SPACED_BASE/usr/bin/bash.exe" || {
+    echo "ERROR: cannot copy bash to spaced test dir" >&2
+    exit 1
+}
+cp "$UCRT64" "$SPACED_BASE/ucrt64_shell_wrapper.exe" || {
+    echo "ERROR: cannot copy wrapper to spaced test dir" >&2
+    exit 1
+}
 result=$("$SPACED_BASE/ucrt64_shell_wrapper.exe" -c 'echo "$MSYSTEM"')
 if [ "$result" = "UCRT64" ]; then
     pass "wrapper path with spaces"
 else
     fail "wrapper path with spaces: got '$result'"
 fi
-rm -rf "$(dirname "$SPACED_BASE")"
+rm -rf "$SPACED_TMP"
+SPACED_TMP=""
 
 # ---------------------------------------------------------------------------
 bold "=== Working directory ==="
@@ -219,16 +270,21 @@ else
 fi
 popd >/dev/null
 rmdir "$CWD_DIR"
+CWD_DIR=""
 
 # ---------------------------------------------------------------------------
 bold "=== Error messages ==="
 
 # Test 17: missing bash.exe
 MISSING_DIR=$(mktemp -d)
-cp "$UCRT64" "$MISSING_DIR/"
+cp "$UCRT64" "$MISSING_DIR/" || {
+    echo "ERROR: cannot stage wrapper for missing-bash test" >&2
+    exit 1
+}
 stderr=$("$MISSING_DIR/ucrt64_shell_wrapper.exe" -c 'echo' 2>&1 1>/dev/null)
 exitcode=$?
 rm -rf "$MISSING_DIR"
+MISSING_DIR=""
 if [ $exitcode -ne 0 ] && echo "$stderr" | grep -q "not found"; then
     pass "error message on missing bash"
 else
@@ -238,10 +294,14 @@ fi
 # Test 18: directory at bash path is also rejected
 DIRBAIT=$(mktemp -d)
 mkdir -p "$DIRBAIT/usr/bin/bash.exe"
-cp "$UCRT64" "$DIRBAIT/"
+cp "$UCRT64" "$DIRBAIT/" || {
+    echo "ERROR: cannot stage wrapper for dir-at-bash-path test" >&2
+    exit 1
+}
 stderr=$("$DIRBAIT/ucrt64_shell_wrapper.exe" -c 'echo' 2>&1 1>/dev/null)
 exitcode=$?
 rm -rf "$DIRBAIT"
+DIRBAIT=""
 if [ $exitcode -ne 0 ] && echo "$stderr" | grep -q "not found"; then
     pass "directory at bash path rejected"
 else

@@ -55,7 +55,7 @@ static size_t quoted_arg_len(const wchar_t *arg)
  * Returns new pos on success, NULL on overflow. Always quotes. */
 static wchar_t *append_quoted_arg_checked(wchar_t *pos, wchar_t *end, const wchar_t *arg)
 {
-    int backslash = 0;
+    size_t backslash = 0;
 
     if (pos >= end)
         return NULL;
@@ -69,7 +69,7 @@ static wchar_t *append_quoted_arg_checked(wchar_t *pos, wchar_t *end, const wcha
         }
         else if (*p == L'"')
         {
-            for (int i = 0; i < backslash * 2; i++)
+            for (size_t i = 0; i < backslash * 2; i++)
             {
                 if (pos >= end)
                     return NULL;
@@ -83,7 +83,7 @@ static wchar_t *append_quoted_arg_checked(wchar_t *pos, wchar_t *end, const wcha
         }
         else
         {
-            for (int i = 0; i < backslash; i++)
+            for (size_t i = 0; i < backslash; i++)
             {
                 if (pos >= end)
                     return NULL;
@@ -96,7 +96,7 @@ static wchar_t *append_quoted_arg_checked(wchar_t *pos, wchar_t *end, const wcha
         }
     }
 
-    for (int i = 0; i < backslash * 2; i++)
+    for (size_t i = 0; i < backslash * 2; i++)
     {
         if (pos >= end)
             return NULL;
@@ -109,21 +109,6 @@ static wchar_t *append_quoted_arg_checked(wchar_t *pos, wchar_t *end, const wcha
     return pos;
 }
 
-/* Append raw string at pos (no quoting). end is one-past-last writable wchar.
- * Returns new pos on success, NULL on overflow.
- * NOTE: only safe for tails already quoted by a Cygwin/MSYS parent. Unused
- * by shell_wrapper.c (which re-quotes argv); kept for tests/future use. */
-static wchar_t *append_raw_checked(wchar_t *pos, wchar_t *end, const wchar_t *s)
-{
-    while (*s)
-    {
-        if (pos >= end)
-            return NULL;
-        *pos++ = *s++;
-    }
-    return pos;
-}
-
 static const wchar_t *skip_spaces_w(const wchar_t *p)
 {
     while (*p == L' ' || *p == L'\t')
@@ -132,7 +117,12 @@ static const wchar_t *skip_spaces_w(const wchar_t *p)
 }
 
 /* Find needle in haystack (case-insensitive) where the char after the match
- * is NUL, space, tab, or '"'. Returns pointer to match start or NULL. */
+ * is NUL, space, tab, or '"', AND the match starts at the beginning of
+ * haystack or right after a path separator, drive colon, or quote. The
+ * before-check prevents swallowing a USER arg that happens to equal the
+ * wrapper name when argv0 itself was renamed (e.g. "other.exe
+ * ucrt64_shell_wrapper.exe" must not skip the second token as argv0).
+ * Returns pointer to match start or NULL. */
 static const wchar_t *find_name_token(const wchar_t *haystack, const wchar_t *needle)
 {
     size_t nlen;
@@ -141,7 +131,13 @@ static const wchar_t *find_name_token(const wchar_t *haystack, const wchar_t *ne
     nlen = wcslen(needle);
     for (const wchar_t *p = haystack; *p; p++)
     {
-        if (_wcsnicmp(p, needle, nlen) == 0)
+        wchar_t before;
+        if (_wcsnicmp(p, needle, nlen) != 0)
+            continue;
+        before = (p == haystack) ? L'\0' : p[-1];
+        if (before != L'\0' && before != L'\\' && before != L'/' &&
+            before != L':' && before != L'"')
+            continue;
         {
             wchar_t after = p[nlen];
             if (after == L'\0' || after == L' ' || after == L'\t' || after == L'"')

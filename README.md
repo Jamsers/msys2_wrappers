@@ -62,7 +62,7 @@ Each wrapper:
 
 1. Finds `usr\bin\bash.exe` relative to its own location (long paths supported)
 2. Sets `MSYSTEM` to the appropriate value (`UCRT64`, `CLANG64`, `MSYS`, etc.) and `CHERE_INVOKING=enabled_from_arguments`
-3. Launches `bash --login` in the current console, forwarding the raw argument tail verbatim
+3. Launches `bash --login` in the current console, re-parsing and re-quoting every argument (always double-quoted, so MSYS/Cygwin's parser can't glob `*?[]` or strip `'`/`~`)
 4. Propagates the exit code; kills `bash` if the wrapper itself is killed
 5. Refuses command lines over 32767 chars with a clear error instead of overflowing
 
@@ -76,7 +76,7 @@ Requires MSVC (Visual Studio 2022 or later). Run from a **Developer Command Prom
 build.cmd
 ```
 
-`build.cmd` also works from a plain prompt: it uses `cl` if already on `PATH`, else tries the standard VS install locations (`VS\18`, `VS\2022` Community, `VS\2022` BuildTools). Override with the `VCVARS64` env var pointing at your `vcvars64.bat`. It stops on the first failed compile (`exit /b 1`).
+`build.cmd` also works from a plain prompt: it uses `cl` if already on `PATH`, else tries the standard VS install locations (`VS\18` and `VS\2022` Community/Professional/Enterprise, `VS\2022` BuildTools). Override with the `VCVARS64` env var pointing at your `vcvars64.bat` (a bad path fails loudly). It stops on the first failed compile (`exit /b 1`).
 
 This compiles all wrappers and the test binary.
 
@@ -90,7 +90,7 @@ cl /nologo /utf-8 /O1 /MT /GL /W4 /WX msys_shell_wrapper.c /Fe:msys_shell_wrappe
 
 (The static `/MT` runtime makes each wrapper a drop-in single file with no VC redist dependency.)
 
-Each binary is ~100KB.
+Each binary is ~150KB.
 
 ## Tests
 
@@ -113,13 +113,13 @@ Create a 3-line `.c` file:
 #include "shell_wrapper.c"
 ```
 
-Then compile it.
+Then add a `cl` line for it in `build.cmd` and compile.
 
 ## Project structure
 
 | File | Purpose |
 |------|---------|
-| `shell_wrapper.c` | Common implementation (forward raw arg tail, spawn bash) |
+| `shell_wrapper.c` | Common implementation (re-quote args, spawn bash) |
 | `quoting.h` | Shared quoting + argv0-skipping logic |
 | `ucrt64_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=UCRT64` |
 | `clang64_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=CLANG64` |

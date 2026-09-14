@@ -133,16 +133,42 @@ static void test_len_matches(const wchar_t *arg, const wchar_t *label)
     }
 }
 
-/* Test: skip_argv0 must return the argument tail for raw command lines. */
+/* Test: skip_argv0 must return the argument tail for raw command lines.
+ * basename/stem are passed in (not hardcoded) so renamed-exe cases where
+ * argv0 does NOT contain the wrapper name can be tested. */
 static void test_skip_argv0(const wchar_t *cmdline, const wchar_t *expected,
+                            const wchar_t *basename, const wchar_t *stem,
                             const wchar_t *label)
 {
-    const wchar_t *tail = skip_argv0(cmdline, L"ucrt64_shell_wrapper.exe",
-                                     L"ucrt64_shell_wrapper");
+    const wchar_t *tail = skip_argv0(cmdline, basename, stem);
     if (wcscmp(tail, expected) == 0)
         record_pass();
     else
         record_fail(label, L"argv0 skip mismatch", expected, tail);
+}
+
+/* Locks in the platform behavior the wrapper's empty-tail fix relies on:
+ * CommandLineToArgvW("") returns argc=1 (the exe path), NOT argc=0 --
+ * so shell_wrapper.c must special-case an empty tail to zero args. */
+static void test_empty_tail_argc1(void)
+{
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(L"", &argc);
+    if (!argv)
+    {
+        record_fail(L"empty tail argc", L"CommandLineToArgvW returned NULL",
+                    L"argc=1", L"(null)");
+        return;
+    }
+    if (argc == 1)
+        record_pass();
+    else
+    {
+        wchar_t got[64];
+        _snwprintf_s(got, _countof(got), _TRUNCATE, L"argc=%d", argc);
+        record_fail(L"empty tail argc", L"argc mismatch", L"argc=1", got);
+    }
+    LocalFree(argv);
 }
 
 /* Test: a long arg must roundtrip (guards the fixed-buffer era). */
@@ -213,21 +239,40 @@ int main()
     test_len_matches(L"trail\\\\\\", L"len trailing backslashes");
 
     test_skip_argv0(L"ucrt64_shell_wrapper.exe -c 'echo hi'",
-                    L"-c 'echo hi'", L"bare argv0");
+                    L"-c 'echo hi'", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"bare argv0");
     test_skip_argv0(L"\"C:\\My Dir\\ucrt64_shell_wrapper.exe\" -c 'echo hi'",
-                    L"-c 'echo hi'", L"quoted argv0 with spaces");
+                    L"-c 'echo hi'", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"quoted argv0 with spaces");
     test_skip_argv0(L"C:\\My Dir\\ucrt64_shell_wrapper.exe -c 'echo hi'",
-                    L"-c 'echo hi'", L"unquoted argv0 with spaces");
+                    L"-c 'echo hi'", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"unquoted argv0 with spaces");
     test_skip_argv0(L"C:\\msys64\\ucrt64_shell_wrapper -c 'echo hi'",
-                    L"-c 'echo hi'", L"argv0 without extension");
+                    L"-c 'echo hi'", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"argv0 without extension");
     test_skip_argv0(L"  ucrt64_shell_wrapper.exe   -c x  ",
-                    L"-c x  ", L"leading/multiple spaces");
+                    L"-c x  ", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"leading/multiple spaces");
     test_skip_argv0(L"ucrt64_shell_wrapper.exe",
-                    L"", L"no args");
+                    L"", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"no args");
     test_skip_argv0(L"\"ucrt64_shell_wrapper.exe",
-                    L"", L"unterminated quote");
+                    L"", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"unterminated quote");
     test_skip_argv0(L"C:\\Tools\\OTHER.exe -c hi",
-                    L"-c hi", L"unknown argv0 fallback");
+                    L"-c hi", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"unknown argv0 fallback");
+    /* Regression: renamed exe + user arg equal to wrapper name must NOT be
+     * swallowed as argv0 (before-check: match only at start or after a
+     * path separator). */
+    test_skip_argv0(L"C:\\Tools\\OTHER.exe ucrt64_shell_wrapper.exe -c hi",
+                    L"ucrt64_shell_wrapper.exe -c hi", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"basename as user arg not swallowed");
+    test_skip_argv0(L"C:\\Tools\\OTHER.exe ucrt64_shell_wrapper -c hi",
+                    L"ucrt64_shell_wrapper -c hi", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"stem as user arg not swallowed");
+    /* Baseline check the empty-tail fix depends on. */
+    test_empty_tail_argc1();
 
     wprintf(L"\n%d passed, %d failed, %d total\n",
             tests_passed, tests_failed, tests_run);

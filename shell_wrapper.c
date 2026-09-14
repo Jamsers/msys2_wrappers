@@ -56,14 +56,18 @@ static void err_write(const wchar_t *msg)
     fwprintf(stderr, L"%s", msg);
 }
 
+/* Error buffer sized for a worst-case message: program name +
+ * full 32K path + decoration. Kept static to avoid stack bloat. */
+#define FAIL_BUF_CAP (LONG_PATH_CAP + 256)
+static wchar_t failBuf[FAIL_BUF_CAP];
+
 static void fail(const wchar_t *fmt, ...)
 {
-    wchar_t buf[4096];
     va_list ap;
     va_start(ap, fmt);
-    _vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, ap);
+    _vsnwprintf_s(failBuf, _countof(failBuf), _TRUNCATE, fmt, ap);
     va_end(ap);
-    err_write(buf);
+    err_write(failBuf);
 }
 
 int main()
@@ -140,33 +144,51 @@ int main()
      * raw tail would corrupt args the parent sent bare (e.g. '*.txt').
      * The argv0 shift for spaced paths is handled by skipping the raw
      * argv0 tail and re-parsing only the tail: argv[0] of THAT parse is the
-     * real first user arg. */
+     * real first user arg.
+     * Empty tail means zero user args: CommandLineToArgvW(L"") does NOT
+     * return argc=0 -- it returns the current exe path as a single arg,
+     * which would be forwarded to bash as a bogus script path. */
     argTail = skip_argv0(GetCommandLineW(), WRAPPER_BASENAME, WRAPPER_STEM);
-    argv = CommandLineToArgvW(argTail, &argc);
-    if (!argv)
+    argc = 0;
+    argv = NULL;
+    if (*argTail != L'\0')
     {
-        fail(L"%s: failed to parse command line (error %lu)\n",
-             PROGRAM_NAME, GetLastError());
-        return 1;
+        argv = CommandLineToArgvW(argTail, &argc);
+        if (!argv)
+        {
+            fail(L"%s: failed to parse command line (error %lu)\n",
+                 PROGRAM_NAME, GetLastError());
+            return 1;
+        }
     }
 
     bashQ = quoted_arg_len(bashPath);
     loginQ = quoted_arg_len(L"--login");
-    if (bashQ == (size_t)-1 || loginQ == (size_t)-1)
+    if (bashQ == (size_t)-1 || loginQ == (size_t)-1 ||
+        loginQ > (size_t)MAX_CMDLINE - 1 ||
+        bashQ > (size_t)MAX_CMDLINE - 1 - loginQ)
     {
         fail(L"%s: path too long to quote\n", PROGRAM_NAME);
-        LocalFree(argv);
+        if (argv)
+            LocalFree(argv);
         return 1;
     }
     need = bashQ + 1 + loginQ;
     for (i = 0; i < (size_t)argc; i++)
     {
         size_t q = quoted_arg_len(argv[i]);
-        if (q == (size_t)-1 || need > MAX_CMDLINE - (1 + q))
+        /* Overflow-safe: reject if 1+q doesn't fit in remaining space.
+         * (q is small in practice -- CommandLineToArgvW input is capped
+         * at 32767 chars -- but never trust arithmetic that can wrap.
+         * The need >= MAX_CMDLINE check must come first so the
+         * subtraction below can't underflow.) */
+        if (q == (size_t)-1 || need >= (size_t)MAX_CMDLINE ||
+            q > (size_t)MAX_CMDLINE - need - 1)
         {
             fail(L"%s: command line too long (max %d chars)\n",
                  PROGRAM_NAME, MAX_CMDLINE);
-            LocalFree(argv);
+            if (argv)
+                LocalFree(argv);
             return 1;
         }
         need += 1 + q;
@@ -176,7 +198,8 @@ int main()
     if (!cmdline)
     {
         fail(L"%s: out of memory\n", PROGRAM_NAME);
-        LocalFree(argv);
+        if (argv)
+            LocalFree(argv);
         return 1;
     }
     pos = cmdline;
@@ -201,11 +224,13 @@ int main()
     {
         fail(L"%s: internal error building command line\n", PROGRAM_NAME);
         free(cmdline);
-        LocalFree(argv);
+        if (argv)
+            LocalFree(argv);
         return 1;
     }
     *pos = L'\0';
-    LocalFree(argv);
+    if (argv)
+        LocalFree(argv);
     argv = NULL;
 
     /* Kill bash if the wrapper dies (close/kill of wrapper). Best effort:
@@ -249,11 +274,25 @@ int main()
             CloseHandle(hJob);
             hJob = NULL;
         }
-        ResumeThread(pi.hThread);
+        if (ResumeThread(pi.hThread) == (DWORD)-1)
+        {
+            /* Should never happen; bash would hang suspended forever.
+             * Kill it and report instead of waiting indefinitely. */
+            DWORD err = GetLastError();
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            if (hJob)
+                CloseHandle(hJob);
+            fail(L"%s: failed to resume %s (error %lu)\n",
+                 PROGRAM_NAME, bashPath, err);
+            return 1;
+        }
     }
 
-    /* Ignore Ctrl-C/Ctrl-Break in the wrapper while waiting; bash shares
-     * our console and handles them itself. */
+    /* Ignore Ctrl-C while waiting; bash shares our console and handles
+     * it itself. (Ctrl-Break is separately ignored only if bash opts in;
+     * most console children die on Ctrl-Break regardless.) */
     SetConsoleCtrlHandler(NULL, TRUE);
     WaitForSingleObject(pi.hProcess, INFINITE);
     SetConsoleCtrlHandler(NULL, FALSE);
