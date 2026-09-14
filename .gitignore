@@ -2,3 +2,5 @@
 *.obj
 *.ilk
 *.pdb
+*.ipdb
+*.iobj

@@ -60,43 +60,46 @@ Add a profile:
 
 Each wrapper:
 
-1. Finds `usr\bin\bash.exe` relative to its own location
+1. Finds `usr\bin\bash.exe` relative to its own location (long paths supported)
 2. Sets `MSYSTEM` to the appropriate value (`UCRT64`, `CLANG64`, `MSYS`, etc.) and `CHERE_INVOKING=enabled_from_arguments`
-3. Launches `bash --login` in the current console, passing through all arguments
-4. Propagates the exit code
+3. Launches `bash --login` in the current console, forwarding the raw argument tail verbatim
+4. Propagates the exit code; kills `bash` if the wrapper itself is killed
+5. Refuses command lines over 32767 chars with a clear error instead of overflowing
 
 Failures write a diagnostic to stderr.
 
 ## Build
 
-Requires MSVC (Visual Studio). Run from a **Developer Command Prompt for VS 2022+**:
+Requires MSVC (Visual Studio 2022 or later). Run from a **Developer Command Prompt**:
 
 ```
 build.cmd
 ```
 
-> **Note:** `build.cmd` has the VS path hardcoded as `C:\Program Files\Microsoft Visual Studio\18\...`. If your VS version or install path differs, adjust the `call` line in it to match your `vcvars64.bat`.
+`build.cmd` also works from a plain prompt: it uses `cl` if already on `PATH`, else tries the standard VS install locations (`VS\18`, `VS\2022` Community, `VS\2022` BuildTools). Override with the `VCVARS64` env var pointing at your `vcvars64.bat`. It stops on the first failed compile (`exit /b 1`).
 
 This compiles all wrappers and the test binary.
 
-Or from PowerShell:
+Or compile manually from a Developer Command Prompt:
 
-```powershell
-& "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
-cl /nologo /O1 /MD /GL /W4 ucrt64_shell_wrapper.c /Fe:ucrt64_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
-cl /nologo /O1 /MD /GL /W4 clang64_shell_wrapper.c /Fe:clang64_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
-cl /nologo /O1 /MD /GL /W4 msys_shell_wrapper.c /Fe:msys_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
+```
+cl /nologo /utf-8 /O1 /MT /GL /W4 /WX ucrt64_shell_wrapper.c /Fe:ucrt64_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
+cl /nologo /utf-8 /O1 /MT /GL /W4 /WX clang64_shell_wrapper.c /Fe:clang64_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
+cl /nologo /utf-8 /O1 /MT /GL /W4 /WX msys_shell_wrapper.c /Fe:msys_shell_wrapper.exe /link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
 ```
 
-Each binary is ~12KB.
+(The static `/MT` runtime makes each wrapper a drop-in single file with no VC redist dependency.)
+
+Each binary is ~100KB.
 
 ## Tests
 
 ```bash
-# C quoting unit tests (roundtrip through CommandLineToArgvW)
+# C quoting unit tests (roundtrip through CommandLineToArgvW, argv0 skipping)
 test_quoting.exe
 
-# Integration tests (env, exit codes, arg passthrough)
+# Integration tests (env, exit codes, arg passthrough, error paths)
+# Uses /c/msys64 by default; override with MSYS2_ROOT=/path/to/msys64
 bash test_wrapper.sh
 ```
 
@@ -116,10 +119,11 @@ Then compile it.
 
 | File | Purpose |
 |------|---------|
-| `shell_wrapper.c` | Common implementation (140 lines) |
+| `shell_wrapper.c` | Common implementation (forward raw arg tail, spawn bash) |
+| `quoting.h` | Shared quoting + argv0-skipping logic |
 | `ucrt64_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=UCRT64` |
 | `clang64_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=CLANG64` |
 | `msys_shell_wrapper.c` | 3-line wrapper, sets `MSYSTEM=MSYS` |
 | `test_quoting.c` | C unit tests for quoting logic |
 | `test_wrapper.sh` | Integration tests |
-| `build.cmd` | One-liner to rebuild all |
+| `build.cmd` | Rebuilds everything, stops on first error |

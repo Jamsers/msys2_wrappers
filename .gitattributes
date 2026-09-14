@@ -1,0 +1,16 @@
+# Normalize line endings on commit; enforce per-type endings on checkout.
+* text=auto eol=lf
+
+# Windows batch must be CRLF (cmd.exe); C sources CRLF for MSVC-friendliness.
+*.cmd text eol=crlf
+*.c text eol=crlf
+*.h text eol=crlf
+
+# Shell scripts must be LF (a CR breaks the shebang).
+*.sh text eol=lf
+
+# Docs / misc: LF.
+*.md text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+LICENSE text eol=lf
