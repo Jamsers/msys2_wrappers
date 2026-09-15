@@ -36,6 +36,11 @@ if %errorlevel% neq 0 (
   exit /b 1
 )
 
+rem Pre-clean stale objects: a failed build exits early (leaving .obj files
+rem behind), and a retry would otherwise link objects built with different
+rem flags (/MT /GL vs plain) or from older sources.
+del *.obj *.ilk *.pdb *.ipdb *.iobj 2>nul
+
 set CFLAGS=/nologo /utf-8 /O1 /MT /GL /W4 /WX
 set LDFLAGS=/link /LTCG /SUBSYSTEM:CONSOLE shell32.lib
 

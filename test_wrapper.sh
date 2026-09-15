@@ -213,6 +213,37 @@ expected=$'[simple]\n[has space]\n[a"b]\n[trail\\]'
     && pass "multiple tricky args" \
     || fail "multiple tricky args: got '$result'"
 
+# Test 13b: tricky args in FIRST user-arg position.
+# Regression: the wrapper parsed the bare tail with CommandLineToArgvW,
+# whose element-0 (argv0) grammar decodes backslash-quote sequences
+# literally -- so a quoted first arg containing a quote arrived mangled
+# ('"a\"b"' became 'a\' + 'b'; 'trail\' became 'trail\\'). Quoting the
+# -c command string forces msys bash to emit the quoted wire form for the
+# FIRST user arg too (verified: "-c" "printf..."), putting the wrapper's
+# tail parser in the previously-broken position. The guard asserts the
+# direct run delivered the args before trusting the comparison.
+check_first_position() {
+    local desc="$1"; shift
+    local wrapped direct expected
+    expected=$(printf '[%s]' "$@")
+    direct=$("$BASH" --login "-c" 'printf "[%s]" "$@"' _ "$@" 2>&1)
+    wrapped=$("$UCRT64" "-c" 'printf "[%s]" "$@"' _ "$@" 2>&1)
+    if [ "$direct" != "$expected" ]; then
+        fail "$desc: TEST BUG -- direct bash delivered '$direct', expected '$expected'"
+        return
+    fi
+    if [ "$wrapped" = "$direct" ]; then
+        pass "$desc"
+    else
+        fail "$desc: wrapper='$wrapped' direct='$direct'"
+    fi
+}
+check_first_position "quoted first arg with quote passes through" 'a"b'
+check_first_position "quoted first arg backslash-quote passes through" 'a\"b'
+check_first_position "first arg trailing backslash passes through" 'trail\'
+check_first_position "first arg with space passes through" 'has space'
+check_first_position "empty first arg passes through" ''
+
 # Test 14: Cygwin-sensitive args must pass through unmangled.
 # Run in a scratch dir with glob-matching files so a glob-expansion
 # regression is caught (unquoted *?[] would expand to file names).

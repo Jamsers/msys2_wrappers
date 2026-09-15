@@ -1,5 +1,6 @@
 #pragma once
-/* Shared quoting + argv0-skipping logic for shell_wrapper.c and test_quoting.c.
+/* Shared quoting, argv0-skipping, and tail-parsing logic for shell_wrapper.c
+ * and test_quoting.c.
  *
  * Quoting rules: always wrap every arg in double quotes and implement
  * CommandLineToArgvW escaping (backslash-quote combinations). Always-quote
@@ -8,8 +9,13 @@
  * suppresses that mangling while remaining safe for CommandLineToArgvW.
  */
 #include <stddef.h>
+#include <stdlib.h>
 #include <wchar.h>
 #include <string.h>
+/* Needed by parse_arg_tail below. Both consumers include these first (with
+ * WIN32_LEAN_AND_MEAN defined), so this re-inclusion is a no-op. */
+#include <windows.h>
+#include <shellapi.h>
 
 /* Length of the quoted form of arg, not including NUL. Always quotes.
  * Returns (size_t)-1 on overflow (practically impossible: inputs <= 32767). */
@@ -118,10 +124,14 @@ static const wchar_t *skip_spaces_w(const wchar_t *p)
 
 /* Find needle in haystack (case-insensitive) where the char after the match
  * is NUL, space, tab, or '"', AND the match starts at the beginning of
- * haystack or right after a path separator, drive colon, or quote. The
- * before-check prevents swallowing a USER arg that happens to equal the
- * wrapper name when argv0 itself was renamed (e.g. "other.exe
- * ucrt64_shell_wrapper.exe" must not skip the second token as argv0).
+ * haystack or right after a path separator or drive colon. The before-check
+ * prevents swallowing a USER arg that happens to equal the wrapper name
+ * when argv0 itself was renamed (e.g. "other.exe ucrt64_shell_wrapper.exe"
+ * must not skip the second token as argv0). NOTE: a quote is deliberately
+ * NOT in the before set: quoted argv0 ("C:\dir\wrapper.exe") is handled
+ * earlier in skip_argv0 and never reaches this search, so a quote before a
+ * match can only mean a QUOTED USER ARG (e.g. other.exe
+ * "ucrt64_shell_wrapper.exe" -c hi) -- swallowing it would eat user input.
  * Returns pointer to match start or NULL. */
 static const wchar_t *find_name_token(const wchar_t *haystack, const wchar_t *needle)
 {
@@ -136,7 +146,7 @@ static const wchar_t *find_name_token(const wchar_t *haystack, const wchar_t *ne
             continue;
         before = (p == haystack) ? L'\0' : p[-1];
         if (before != L'\0' && before != L'\\' && before != L'/' &&
-            before != L':' && before != L'"')
+            before != L':')
             continue;
         {
             wchar_t after = p[nlen];
@@ -197,4 +207,68 @@ static const wchar_t *skip_argv0(const wchar_t *cmdline,
     while (*p && *p != L' ' && *p != L'\t')
         p++;
     return skip_spaces_w(p);
+}
+
+/* Parse an argument tail (argv0 already skipped) into user args.
+ *
+ * The tail is parsed with a dummy argv0 prefix ("x <tail>") and argv[0] of
+ * THAT parse is discarded. This is load-bearing, not cosmetic:
+ * CommandLineToArgvW decodes element 0 with DIFFERENT (argv0) grammar --
+ * backslash-quote sequences decode literally there ("a\"b" at position 0
+ * yields a\ + b instead of a"b). Parsing the bare tail would therefore
+ * corrupt a quoted first user arg containing a quote; the dummy prefix
+ * keeps every user arg in argument position. (Empty tail means zero user
+ * args: CommandLineToArgvW(L"") does NOT return argc=0 -- it returns the
+ * current exe path as a single arg, which would be forwarded to bash as a
+ * bogus script path. Whitespace-only tails also yield zero user args:
+ * CTA("x   ") returns argc=1, so no tail pre-trimming is needed.)
+ *
+ * Returns 0 on success, -1 on allocation/parse failure (GetLastError set
+ * by CommandLineToArgvW on parse failure). On success *outArgv is NULL
+ * and *outArgc 0 when there are no user args; otherwise *outArgv points
+ * to a CommandLineToArgvW block whose FIRST element is the dummy and must
+ * be skipped: user args are (*outArgv)[1..*outArgc-1]. The caller frees
+ * with LocalFree(*outArgv) (safe to call only when non-NULL). On failure
+ * *outArgv is NULL and *outArgc 0. */
+static int parse_arg_tail(const wchar_t *argTail, LPWSTR **outArgv, int *outArgc)
+{
+    size_t tailLen;
+    wchar_t *prefixed;
+    LPWSTR *argv;
+    int argc;
+
+    *outArgv = NULL;
+    *outArgc = 0;
+    if (!argTail || *argTail == L'\0')
+        return 0;
+
+    /* "x" + " " + tail + NUL. +3 cannot overflow: tailLen <= 32767. */
+    tailLen = wcslen(argTail);
+    prefixed = (wchar_t *)malloc((tailLen + 3) * sizeof(wchar_t));
+    if (!prefixed)
+        return -1;
+    prefixed[0] = L'x';
+    prefixed[1] = L' ';
+    memcpy(prefixed + 2, argTail, (tailLen + 1) * sizeof(wchar_t));
+
+    argv = CommandLineToArgvW(prefixed, &argc);
+    free(prefixed);
+    if (!argv)
+        return -1;
+    if (argc < 1)
+    {
+        /* Unreachable per CTA docs (always >= 1), but never trust it. */
+        LocalFree(argv);
+        SetLastError(ERROR_INVALID_DATA);
+        return -1;
+    }
+    if (argc == 1)
+    {
+        /* Whitespace-only tail: dummy alone, zero user args. */
+        LocalFree(argv);
+        return 0;
+    }
+    *outArgv = argv;
+    *outArgc = argc;
+    return 0;
 }

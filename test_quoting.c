@@ -75,6 +75,110 @@ static void test_roundtrip(const wchar_t *arg, const wchar_t *label)
     LocalFree(argv);
 }
 
+/* Test: parse_arg_tail must decode a raw tail exactly like
+ * CommandLineToArgvW decodes the same args in argument position of a full
+ * command line. Tails here are written as parents actually build them
+ * (e.g. msys bash emits "a\"b" for first arg a"b) -- this is the wrapper's
+ * real input shape, and the case the bare-tail parse corrupted. */
+static void test_parse_tail(const wchar_t *tail, int expectedUserArgc,
+                            const wchar_t *const *expectedArgs,
+                            const wchar_t *label)
+{
+    LPWSTR *argv = NULL;
+    int argc = 0;
+    int i;
+
+    if (parse_arg_tail(tail, &argv, &argc) != 0)
+    {
+        record_fail(label, L"parse_arg_tail failed", tail, L"(error)");
+        return;
+    }
+    if (argv == NULL || argc < 1)
+    {
+        if (expectedUserArgc == 0 && argv == NULL && argc == 0)
+        {
+            record_pass();
+            return;
+        }
+        record_fail(label, L"argc mismatch (NULL/empty block)",
+                    L"non-empty", L"(null)");
+        if (argv)
+            LocalFree(argv);
+        return;
+    }
+    /* argv[0] is the dummy; user args are argv[1..argc-1]. */
+    if (argc - 1 != expectedUserArgc)
+    {
+        wchar_t exp[64];
+        wchar_t got[64];
+        _snwprintf_s(exp, _countof(exp), _TRUNCATE, L"%d user args", expectedUserArgc);
+        _snwprintf_s(got, _countof(got), _TRUNCATE, L"%d user args", argc - 1);
+        record_fail(label, L"user argc mismatch", exp, got);
+        LocalFree(argv);
+        return;
+    }
+    for (i = 0; i < expectedUserArgc; i++)
+    {
+        if (wcscmp(argv[i + 1], expectedArgs[i]) != 0)
+        {
+            wchar_t detail[64];
+            _snwprintf_s(detail, _countof(detail), _TRUNCATE,
+                         L"user arg %d mismatch", i);
+            record_fail(label, detail, expectedArgs[i], argv[i + 1]);
+            LocalFree(argv);
+            return;
+        }
+    }
+    /* The dummy must be exactly "x" (contract, not cosmetic: a quoted or
+     * spaced dummy would shift parsing). */
+    if (wcscmp(argv[0], L"x") != 0)
+        record_fail(label, L"dummy argv0 mangled", L"x", argv[0]);
+    else
+        record_pass();
+    LocalFree(argv);
+}
+
+/* Locks in the platform trap parse_arg_tail exists to avoid: the SAME
+ * quoted text decodes DIFFERENTLY at position 0 (argv0 grammar) vs
+ * argument position. If this ever passes, the dummy prefix is redundant;
+ * while it fails-as-expected, removing the prefix corrupts quoted first
+ * args containing backslash-quote sequences. */
+static void test_first_position_trap(void)
+{
+    int argc0 = 0;
+    int argcN = 0;
+    LPWSTR *argv0 = CommandLineToArgvW(L"\"a\\\"b\"", &argc0);
+    LPWSTR *argvN = CommandLineToArgvW(L"x \"a\\\"b\"", &argcN);
+    int differs;
+
+    if (!argv0 || !argvN)
+    {
+        record_fail(L"first-position trap", L"CommandLineToArgvW returned NULL",
+                    L"both parse", L"(null)");
+        if (argv0)
+            LocalFree(argv0);
+        if (argvN)
+            LocalFree(argvN);
+        return;
+    }
+    /* Position 0 must NOT decode to the clean single arg (that IS the
+     * trap -- today it yields argc=2, 'a\' + 'b second'), while argument
+     * position must decode cleanly. Either side changing means the
+     * platform behavior moved and the dummy prefix needs re-evaluation. */
+    differs = !(argc0 == 1 && wcscmp(argv0[0], L"a\"b") == 0);
+    if (differs && argcN == 2 && wcscmp(argvN[1], L"a\"b") == 0)
+        record_pass();
+    else
+    {
+        wchar_t got[128];
+        _snwprintf_s(got, _countof(got), _TRUNCATE,
+                     L"pos0 argc=%d, argpos argc=%d", argc0, argcN);
+        record_fail(L"first-position trap", L"platform behavior changed", L"trap intact", got);
+    }
+    LocalFree(argv0);
+    LocalFree(argvN);
+}
+
 /* Test: every arg must come out wrapped in quotes (protects against
  * Cygwin's parser mangling unquoted *?[]' newline ~). */
 static void test_always_quotes(const wchar_t *arg, const wchar_t *label)
@@ -271,8 +375,51 @@ int main()
     test_skip_argv0(L"C:\\Tools\\OTHER.exe ucrt64_shell_wrapper -c hi",
                     L"ucrt64_shell_wrapper -c hi", L"ucrt64_shell_wrapper.exe",
                     L"ucrt64_shell_wrapper", L"stem as user arg not swallowed");
-    /* Baseline check the empty-tail fix depends on. */
+    /* Quoted twins: a quote before the match means a QUOTED USER ARG
+     * (quoted argv0 never reaches the name search), so it must not match
+     * either. Regression: the before-check used to allow '"'. */
+    test_skip_argv0(L"C:\\Tools\\OTHER.exe \"ucrt64_shell_wrapper.exe\" -c hi",
+                    L"\"ucrt64_shell_wrapper.exe\" -c hi", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"quoted basename as user arg not swallowed");
+    test_skip_argv0(L"C:\\Tools\\OTHER.exe \"ucrt64_shell_wrapper\" -c hi",
+                    L"\"ucrt64_shell_wrapper\" -c hi", L"ucrt64_shell_wrapper.exe",
+                    L"ucrt64_shell_wrapper", L"quoted stem as user arg not swallowed");
+    /* Baseline checks the tail-parsing fix depends on. */
     test_empty_tail_argc1();
+    test_first_position_trap();
+
+    /* parse_arg_tail: raw tails in the exact shapes parents build.
+     * (Verified wire forms: msys bash emits "a\"b" for first arg a"b,
+     * "a\\\"b" for a\"b, "x y\\" for [x y\], bare trail\ for trail\,
+     * and "" for empty. Native list2cmdline emits bare a\"b.) */
+    {
+        static const wchar_t *const one_ab[] = { L"a\"b" };
+        static const wchar_t *const one_absqb[] = { L"a\\\"b" };
+        static const wchar_t *const one_trail[] = { L"trail\\" };
+        static const wchar_t *const one_spaced_trail[] = { L"x y\\" };
+        static const wchar_t *const one_empty[] = { L"" };
+        static const wchar_t *const one_space[] = { L"with space" };
+        static const wchar_t *const one_c[] = { L"-c" };
+        static const wchar_t *const one_glob[] = { L"*.txt" };
+        static const wchar_t *const two_ab_second[] = { L"a\"b", L"second" };
+        static const wchar_t *const two_empty_second[] = { L"", L"second" };
+        static const wchar_t *const two_c_cmd[] = { L"-c", L"echo hi" };
+        test_parse_tail(L"\"a\\\"b\"", 1, one_ab, L"tail quoted quote-first");
+        test_parse_tail(L"\"a\\\\\\\"b\"", 1, one_absqb, L"tail quoted backslash-quote-first");
+        test_parse_tail(L"\"trail\\\\\"", 1, one_trail, L"tail quoted trailing-backslash-first");
+        test_parse_tail(L"trail\\", 1, one_trail, L"tail bare trailing backslash");
+        test_parse_tail(L"\"x y\\\\\"", 1, one_spaced_trail, L"tail quoted spaced trailing backslash");
+        test_parse_tail(L"a\\\"b", 1, one_ab, L"tail native-unquoted quote-first");
+        test_parse_tail(L"\"\"", 1, one_empty, L"tail empty-string-first");
+        test_parse_tail(L"\"with space\"", 1, one_space, L"tail quoted spaced-first");
+        test_parse_tail(L"-c", 1, one_c, L"tail bare flag");
+        test_parse_tail(L"*.txt", 1, one_glob, L"tail bare glob");
+        test_parse_tail(L"\"a\\\"b\" second", 2, two_ab_second, L"tail tricky-first plus second");
+        test_parse_tail(L"\"\" second", 2, two_empty_second, L"tail empty-first plus second");
+        test_parse_tail(L"-c \"echo hi\"", 2, two_c_cmd, L"tail flag plus quoted command");
+        test_parse_tail(L"", 0, NULL, L"tail empty is zero args");
+        test_parse_tail(L"   ", 0, NULL, L"tail whitespace-only is zero args");
+    }
 
     wprintf(L"\n%d passed, %d failed, %d total\n",
             tests_passed, tests_failed, tests_run);

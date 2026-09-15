@@ -142,25 +142,24 @@ int main()
      * mandatory: MSYS/Cygwin's child-side parser globs unquoted *?[],
      * strips unquoted single quotes, and expands a bare ~ -- so a verbatim
      * raw tail would corrupt args the parent sent bare (e.g. '*.txt').
-     * The argv0 shift for spaced paths is handled by skipping the raw
-     * argv0 tail and re-parsing only the tail: argv[0] of THAT parse is the
-     * real first user arg.
-     * Empty tail means zero user args: CommandLineToArgvW(L"") does NOT
-     * return argc=0 -- it returns the current exe path as a single arg,
-     * which would be forwarded to bash as a bogus script path. */
+     * Tail parsing goes through parse_arg_tail (dummy-argv0 prefix):
+     * CommandLineToArgvW decodes element 0 with different (argv0) grammar,
+     * so parsing the bare tail would corrupt a quoted first user arg
+     * containing a quote (e.g. '"a\"b"' -> 'a\' + 'b'). The argv0 shift
+     * for spaced paths is handled by skipping the raw argv0 with
+     * skip_argv0 and parsing only the tail; argv[1..] of THAT parse are
+     * the real user args. */
     argTail = skip_argv0(GetCommandLineW(), WRAPPER_BASENAME, WRAPPER_STEM);
     argc = 0;
     argv = NULL;
-    if (*argTail != L'\0')
+    if (parse_arg_tail(argTail, &argv, &argc) != 0)
     {
-        argv = CommandLineToArgvW(argTail, &argc);
-        if (!argv)
-        {
-            fail(L"%s: failed to parse command line (error %lu)\n",
-                 PROGRAM_NAME, GetLastError());
-            return 1;
-        }
+        fail(L"%s: failed to parse command line (error %lu)\n",
+             PROGRAM_NAME, GetLastError());
+        return 1;
     }
+    /* argv[0] is the dummy; user args start at argv[1]. argc >= 2 whenever
+     * argv is non-NULL (parse_arg_tail frees the dummy-only block). */
 
     bashQ = quoted_arg_len(bashPath);
     loginQ = quoted_arg_len(L"--login");
@@ -174,7 +173,7 @@ int main()
         return 1;
     }
     need = bashQ + 1 + loginQ;
-    for (i = 0; i < (size_t)argc; i++)
+    for (i = 1; i < (size_t)argc; i++)
     {
         size_t q = quoted_arg_len(argv[i]);
         /* Overflow-safe: reject if 1+q doesn't fit in remaining space.
@@ -211,7 +210,7 @@ int main()
         pos = NULL;
     if (pos)
         pos = append_quoted_arg_checked(pos, end, L"--login");
-    for (i = 0; pos && i < (size_t)argc; i++)
+    for (i = 1; pos && i < (size_t)argc; i++)
     {
         if (pos < end)
             *pos++ = L' ';
