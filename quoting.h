@@ -2,11 +2,25 @@
 /* Shared quoting, argv0-skipping, and tail-parsing logic for shell_wrapper.c
  * and test_quoting.c.
  *
- * Quoting rules: always wrap every arg in double quotes and implement
- * CommandLineToArgvW escaping (backslash-quote combinations). Always-quote
- * is required because MSYS/Cygwin's parser also treats unquoted *?[]' and
- * newline/tilde specially (globbing, quote stripping). Double-quoting
- * suppresses that mangling while remaining safe for CommandLineToArgvW.
+ * Quoting rules: always wrap every arg in double quotes and escape for the
+ * MSYS runtime's command-line tokenizer -- the parser bash's argv comes
+ * from when its parent is a native process (CreateProcessW). Empirical
+ * tokenizer rules inside double quotes (verified against
+ * C:\msys64\usr\bin\bash.exe):
+ *   \\  -> \     (backslash pairs are HALVED)
+ *   \"  -> "
+ *   \X  -> \X    (any other backslash sequence is literal)
+ * Outside quotes backslashes are literal; MSYS/Cygwin's parser also treats
+ * unquoted *?[]' and newline/tilde specially (globbing, quote stripping).
+ * Always-double-quoting suppresses that mangling.
+ *
+ * NOTE the emitted command line is deliberately NOT CommandLineToArgvW
+ * for mid-word backslash runs: CTA treats them literally, the MSYS
+ * tokenizer halves pairs, so runs before an ordinary character are
+ * emitted doubled to survive the halving. Runs before a quote and runs at
+ * end-of-string are emitted so BOTH dialects decode them identically.
+ * (The INPUT side -- parse_arg_tail -- stays CTA: every known parent,
+ * including MSYS's own spawner for native children, quotes CTA-style.)
  */
 #include <stddef.h>
 #include <stdlib.h>
@@ -41,7 +55,7 @@ static size_t quoted_arg_len(const wchar_t *arg)
         }
         else
         {
-            size_t add = backslash + 1;
+            size_t add = backslash * 2 + 1; /* doubled: MSYS halves pairs */
             if (len > (size_t)-1 - add)
                 return (size_t)-1;
             len += add;
@@ -89,7 +103,9 @@ static wchar_t *append_quoted_arg_checked(wchar_t *pos, wchar_t *end, const wcha
         }
         else
         {
-            for (size_t i = 0; i < backslash; i++)
+            /* Doubled so the MSYS tokenizer's pair-halving restores the
+             * run verbatim (plain CTA quoting halves it: a\\b -> a\b). */
+            for (size_t i = 0; i < backslash * 2; i++)
             {
                 if (pos >= end)
                     return NULL;

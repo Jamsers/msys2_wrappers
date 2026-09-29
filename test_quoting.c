@@ -24,16 +24,91 @@ static void record_fail(const wchar_t *label, const wchar_t *detail,
     tests_run++;
 }
 
-/* Test: quote arg with the shared header, parse back with
- * CommandLineToArgvW, expect the original. */
+/* Decode the next double-quoted token of an emitted command line the way
+ * the MSYS runtime's command-line tokenizer does -- bash's argv source
+ * when the parent is a native process. Rules inside quotes, verified
+ * against real C:\msys64\usr\bin\bash.exe:
+ *   \\ -> \    (backslash pairs are HALVED -- the CTA divergence)
+ *   \" -> "
+ *   \X -> \X   (any other backslash sequence is literal)
+ * A closing double quote ends the token. (The authoritative check of the
+ * real tokenizer is test_wrapper.sh against real bash; this model exists
+ * so unit tests catch dialect regressions.) Advances *pp past the token.
+ * Returns 0 on success, -1 on malformed input or overflow. */
+static int msys_decode_next(const wchar_t **pp, wchar_t *out, size_t outCap)
+{
+    const wchar_t *p = *pp;
+    size_t n = 0;
+
+    if (*p != L'"')
+        return -1;
+    p++;
+    while (*p && *p != L'"')
+    {
+        if (*p == L'\\' && (p[1] == L'\\' || p[1] == L'"'))
+        {
+            if (n + 1 >= outCap)
+                return -1;
+            out[n++] = p[1];        /* \\ -> \,  \" -> " */
+            p += 2;
+        }
+        else if (*p == L'\\' && p[1] != L'\0')
+        {
+            if (n + 2 >= outCap)
+                return -1;
+            out[n++] = *p++;        /* \X -> \X literal */
+            out[n++] = *p++;
+        }
+        else
+        {
+            if (n + 1 >= outCap)
+                return -1;
+            out[n++] = *p++;        /* ordinary char (or lone trailing \) */
+        }
+    }
+    if (*p != L'"')
+        return -1;                  /* unterminated quote */
+    out[n] = L'\0';
+    *pp = p + 1;
+    return 0;
+}
+
+/* True when arg contains a backslash run followed by an ordinary (non-
+ * quote) character -- the one shape where CommandLineToArgvW and the MSYS
+ * tokenizer disagree (runs before a quote and runs at end-of-string decode
+ * identically under both). */
+static int has_midword_bs_run(const wchar_t *arg)
+{
+    size_t run = 0;
+    for (const wchar_t *p = arg; *p; p++)
+    {
+        if (*p == L'\\')
+            run++;
+        else
+        {
+            if (run > 0 && *p != L'"')
+                return 1;
+            run = 0;
+        }
+    }
+    return 0;
+}
+
+/* Test: quote arg with the shared header, then decode it two ways:
+ * PRIMARY: the MSYS tokenizer model (bash is the real consumer; the
+ * emission targets its dialect).
+ * SECONDARY: CommandLineToArgvW. Both dialects must agree everywhere
+ * except mid-word backslash runs, where the output is deliberately
+ * non-CTA (see quoting.h); a CTA mismatch on such an arg is expected. */
 static void test_roundtrip(const wchar_t *arg, const wchar_t *label)
 {
     wchar_t cmdline[32768];
+    wchar_t decoded[32768];
     wchar_t *pos;
     wchar_t *end = cmdline + _countof(cmdline);
     int argc;
     LPWSTR *argv;
-    int match;
+    const wchar_t *p = cmdline;
 
     /* Build: "dummy.exe" <quoted-arg> */
     pos = append_quoted_arg_checked(cmdline, end, L"dummy.exe");
@@ -50,13 +125,41 @@ static void test_roundtrip(const wchar_t *arg, const wchar_t *label)
     }
     *pos = L'\0';
 
+    /* PRIMARY: MSYS tokenizer model. */
+    if (msys_decode_next(&p, decoded, _countof(decoded)) != 0 ||
+        wcscmp(decoded, L"dummy.exe") != 0)
+    {
+        record_fail(label, L"MSYS model: dummy token mangled",
+                    L"dummy.exe", decoded);
+        return;
+    }
+    while (*p == L' ')
+        p++;
+    if (msys_decode_next(&p, decoded, _countof(decoded)) != 0)
+    {
+        record_fail(label, L"MSYS model: arg token malformed", arg, L"(parse error)");
+        return;
+    }
+    if (wcscmp(decoded, arg) != 0)
+    {
+        record_fail(label, L"MSYS roundtrip mismatch", arg, decoded);
+        return;
+    }
+    while (*p == L' ')
+        p++;
+    if (*p != L'\0')
+    {
+        record_fail(label, L"MSYS model: trailing garbage", L"(end of token)", p);
+        return;
+    }
+
+    /* SECONDARY: CommandLineToArgvW agreement outside the divergent shape. */
     argv = CommandLineToArgvW(cmdline, &argc);
     if (!argv)
     {
         record_fail(label, L"CommandLineToArgvW returned NULL", arg, L"(null)");
         return;
     }
-
     if (argc != 2)
     {
         wchar_t got[64];
@@ -65,13 +168,71 @@ static void test_roundtrip(const wchar_t *arg, const wchar_t *label)
         LocalFree(argv);
         return;
     }
-
-    match = (wcscmp(argv[1], arg) == 0);
-    if (match)
+    if (wcscmp(argv[1], arg) == 0 || has_midword_bs_run(arg))
         record_pass();
     else
-        record_fail(label, L"roundtrip mismatch", arg, argv[1]);
+        record_fail(label, L"CTA roundtrip mismatch", arg, argv[1]);
+    LocalFree(argv);
+}
 
+/* Locks in the dialect split the quoting targets: for a mid-word backslash
+ * pair, the emitted form must decode to the original under the MSYS model
+ * and must NOT under CommandLineToArgvW (its output is deliberately
+ * non-CTA there). If this ever fails, either the tokenizer rules moved or
+ * the emission became CTA-compatible again -- re-evaluate the doubling. */
+static void test_dialect_divergence(void)
+{
+    static const wchar_t *const arg = L"a\\\\b"; /* a, \, \, b */
+    wchar_t cmdline[32768];
+    wchar_t decoded[32768];
+    wchar_t *pos;
+    wchar_t *end = cmdline + _countof(cmdline);
+    const wchar_t *p = cmdline;
+    int argc = 0;
+    LPWSTR *argv;
+
+    pos = append_quoted_arg_checked(cmdline, end, L"dummy.exe");
+    if (pos && pos < end)
+        *pos++ = L' ';
+    else
+        pos = NULL;
+    if (pos)
+        pos = append_quoted_arg_checked(pos, end, arg);
+    if (!pos || pos >= end)
+    {
+        record_fail(L"dialect divergence", L"quoting overflowed test buffer",
+                    arg, L"(overflow)");
+        return;
+    }
+    *pos = L'\0';
+
+    if (msys_decode_next(&p, decoded, _countof(decoded)) != 0 ||
+        wcscmp(decoded, L"dummy.exe") != 0)
+    {
+        record_fail(L"dialect divergence", L"MSYS model: dummy token mangled",
+                    L"dummy.exe", decoded);
+        return;
+    }
+    p++; /* the separating space */
+    if (msys_decode_next(&p, decoded, _countof(decoded)) != 0 ||
+        wcscmp(decoded, arg) != 0)
+    {
+        record_fail(L"dialect divergence", L"MSYS model must decode doubled run",
+                    arg, decoded);
+        return;
+    }
+    argv = CommandLineToArgvW(cmdline, &argc);
+    if (!argv)
+    {
+        record_fail(L"dialect divergence", L"CommandLineToArgvW returned NULL",
+                    L"(null)", L"(null)");
+        return;
+    }
+    if (argc == 2 && wcscmp(argv[1], arg) != 0)
+        record_pass();  /* divergence intact */
+    else
+        record_fail(L"dialect divergence", L"CTA unexpectedly agrees with MSYS",
+                    L"CTA differs", L"CTA agrees");
     LocalFree(argv);
 }
 
@@ -302,6 +463,14 @@ int main()
     test_roundtrip(L"\"hello\"",                     L"wrapped in quotes");
     test_roundtrip(L"a\"b\"c\"d",                    L"multiple quotes");
     test_roundtrip(L"a\\b",                          L"backslash mid-word");
+    test_roundtrip(L"a\\\\b",                        L"double backslash mid-word");
+    test_roundtrip(L"a\\\\\\b",                      L"triple backslash mid-word");
+    test_roundtrip(L"a\\\\\\\\b",                    L"quadruple backslash mid-word");
+    test_roundtrip(L"a\\\\b c",                      L"double backslash with space");
+    test_roundtrip(L"a\\$b",                         L"backslash before dollar");
+    test_roundtrip(L"a\\`b",                         L"backslash before backtick");
+    test_roundtrip(L"a\\\\$b",                       L"double backslash before dollar");
+    test_roundtrip(L"a\\\\b\"c\\\\d",                L"mixed runs and quote");
     test_roundtrip(L"trail\\",                       L"trailing backslash");
     test_roundtrip(L"trail\\\\",                     L"two trailing backslashes");
     test_roundtrip(L"a\\\"b",                        L"backslash before quote");
@@ -340,6 +509,8 @@ int main()
     test_len_matches(L"hello", L"len plain");
     test_len_matches(L"", L"len empty");
     test_len_matches(L"a\"b", L"len quote");
+    test_len_matches(L"a\\\\b", L"len mid-word backslash run");
+    test_len_matches(L"a\\\\\\b\"c", L"len mixed backslash runs");
     test_len_matches(L"trail\\\\\\", L"len trailing backslashes");
 
     test_skip_argv0(L"ucrt64_shell_wrapper.exe -c 'echo hi'",
@@ -387,6 +558,7 @@ int main()
     /* Baseline checks the tail-parsing fix depends on. */
     test_empty_tail_argc1();
     test_first_position_trap();
+    test_dialect_divergence();
 
     /* parse_arg_tail: raw tails in the exact shapes parents build.
      * (Verified wire forms: msys bash emits "a\"b" for first arg a"b,

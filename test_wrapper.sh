@@ -244,6 +244,20 @@ check_first_position "first arg trailing backslash passes through" 'trail\'
 check_first_position "first arg with space passes through" 'has space'
 check_first_position "empty first arg passes through" ''
 
+# Test 13c: backslash runs in arguments must pass through unmangled.
+# The wrapper emits runs before ordinary characters DOUBLED because the
+# MSYS command-line tokenizer halves backslash pairs inside double quotes
+# (one halving per wrapper hop). Before that fix, every doubled mid-word
+# run lost half its backslashes silently. The 'a\\b' case below is the
+# exact shape that used to collapse to 'a\b'.
+check_passthrough "single backslash mid-word" 'a\b'
+check_passthrough "double backslash mid-word" 'a\\b'
+check_passthrough "triple backslash mid-word" 'a\\\b'
+check_passthrough "double backslash with space" 'a\\b c'
+check_passthrough "double backslash before dollar" 'a\\$b'
+check_passthrough "backslash before quote" 'a\"b'
+check_passthrough "trailing double backslash" 'trail\\'
+
 # Test 14: Cygwin-sensitive args must pass through unmangled.
 # Run in a scratch dir with glob-matching files so a glob-expansion
 # regression is caught (unquoted *?[] would expand to file names).
