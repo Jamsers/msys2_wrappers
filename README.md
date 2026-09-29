@@ -62,7 +62,7 @@ Each wrapper:
 
 1. Finds `usr\bin\bash.exe` relative to its own location (long paths supported)
 2. Sets `MSYSTEM` to the appropriate value (`UCRT64`, `CLANG64`, `MSYS`, etc.) and `CHERE_INVOKING=enabled_from_arguments`
-3. Launches `bash --login` in the current console, re-parsing and re-quoting every argument (always double-quoted, so MSYS/Cygwin's parser can't glob `*?[]` or strip `'`/`~`)
+3. Launches `bash --login` in the current console, re-parsing and re-quoting every argument (always double-quoted, so MSYS/Cygwin's parser can't glob `*?[]` or strip `'`/`~`; mid-word backslash runs are emitted doubled because that parser halves `\\` pairs inside double quotes)
 4. Propagates the exit code; kills `bash` if the wrapper itself is killed
 5. Refuses command lines over 32767 chars with a clear error instead of overflowing
 
@@ -95,7 +95,8 @@ Each binary is ~150KB.
 ## Tests
 
 ```bash
-# C quoting unit tests (roundtrip through CommandLineToArgvW, argv0 skipping)
+# C quoting unit tests (MSYS-tokenizer roundtrip + CommandLineToArgvW
+# agreement, argv0 skipping)
 test_quoting.exe
 
 # Integration tests (env, exit codes, arg passthrough, error paths)
