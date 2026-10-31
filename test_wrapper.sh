@@ -307,8 +307,10 @@ bold "=== Working directory ==="
 
 # Test 16: CHERE_INVOKING - stays in current directory.
 # Must use a non-$HOME dir: the missing-CHERE fallback cds to $HOME,
-# which would make a $HOME-based test vacuous.
-CWD_DIR=$(mktemp -d)
+# which would make a $HOME-based test vacuous. Create it under $HOME (not
+# /tmp): with MSYS2_ROOT set to a copied tree, a /tmp path renders through
+# that copy's root and the comparison becomes spurious.
+CWD_DIR=$(mktemp -d "$HOME/msys2_wrappers_cwd.XXXXXX")
 pushd "$CWD_DIR" >/dev/null
 result=$("$UCRT64" -c 'pwd' 2>/dev/null)
 if [ "$result" = "$CWD_DIR" ]; then

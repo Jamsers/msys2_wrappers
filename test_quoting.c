@@ -522,6 +522,21 @@ int main()
     test_skip_argv0(L"C:\\My Dir\\ucrt64_shell_wrapper.exe -c 'echo hi'",
                     L"-c 'echo hi'", L"ucrt64_shell_wrapper.exe",
                     L"ucrt64_shell_wrapper", L"unquoted argv0 with spaces");
+    /* The wrapper now passes its ACTUAL basename (derived from
+     * GetModuleFileNameW), so renamed copies must still work. */
+    test_skip_argv0(L"C:\\My Dir\\other.exe -c 'echo hi'",
+                    L"-c 'echo hi'", L"other.exe",
+                    L"other", L"renamed exe, unquoted spaced argv0");
+    test_skip_argv0(L"C:\\My Dir\\other.EXE -c 'echo hi'",
+                    L"-c 'echo hi'", L"other.EXE",
+                    L"other", L"renamed exe, uppercase extension");
+    test_skip_argv0(L"C:\\My Dir\\other.exe C:\\fake\\other.exe -c hi",
+                    L"C:\\fake\\other.exe -c hi", L"other.exe",
+                    L"other", L"renamed basename as user arg not swallowed");
+    test_skip_argv0(L"C:\\msys64\\ucrt64_shell_wrapper.exe C:\\fake\\ucrt64_shell_wrapper.exe -c hi",
+                    L"C:\\fake\\ucrt64_shell_wrapper.exe -c hi",
+                    L"ucrt64_shell_wrapper.exe", L"ucrt64_shell_wrapper",
+                    L"canonical basename as user arg not swallowed");
     test_skip_argv0(L"C:\\msys64\\ucrt64_shell_wrapper -c 'echo hi'",
                     L"-c 'echo hi'", L"ucrt64_shell_wrapper.exe",
                     L"ucrt64_shell_wrapper", L"argv0 without extension");

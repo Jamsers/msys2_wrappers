@@ -16,10 +16,6 @@
 #error "MSYSTEM_VALUE must be defined by the including stub (e.g. L\"UCRT64\")"
 #endif
 
-/* Adjacent wide literals concatenate: L"ucrt64_shell_wrapper" L".exe" */
-#define WRAPPER_BASENAME PROGRAM_NAME L".exe"
-#define WRAPPER_STEM PROGRAM_NAME
-
 /* CreateProcessW accepts at most 32767 chars INCLUDING the terminating NUL,
  * so this is the maximum content length (the last arg check must not allow
  * need == 32767, which fails with ERROR_FILENAME_EXCED_RANGE). */
@@ -79,6 +75,14 @@ static void fail(const wchar_t *fmt, ...)
     _vsnwprintf_s(failBuf, _countof(failBuf), _TRUNCATE, fmt, ap);
     va_end(ap);
     err_write(failBuf);
+}
+
+/* While waiting for bash, ignore Ctrl-C and Ctrl-Break in the wrapper so
+ * bash gets to report its own exit status (the console delivers both events
+ * to every process in the group). Close/logoff/shutdown still terminate. */
+static BOOL WINAPI ctrl_handler(DWORD type)
+{
+    return type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT;
 }
 
 /* MSYS2's 8186 limit counts decoded characters, not UTF-16 code units, so
@@ -200,6 +204,10 @@ int main()
 {
     static wchar_t exePath[LONG_PATH_CAP];
     static wchar_t bashPath[LONG_PATH_CAP];
+    static wchar_t exeName[LONG_PATH_CAP];
+    static wchar_t exeStem[LONG_PATH_CAP];
+    const wchar_t *exeBase;
+    wchar_t *exeDot;
     wchar_t *lastSlash;
     wchar_t *lastFwd;
     wchar_t *cmdline = NULL;
@@ -238,6 +246,21 @@ int main()
         fail(L"%s: unexpected executable path format\n", PROGRAM_NAME);
         return 1;
     }
+    exeBase = lastSlash + 1;
+    if (*exeBase == L'\0' ||
+        _snwprintf_s(exeName, _countof(exeName), _TRUNCATE,
+                     L"%s", exeBase) < 0 ||
+        _snwprintf_s(exeStem, _countof(exeStem), _TRUNCATE,
+                     L"%s", exeBase) < 0)
+    {
+        fail(L"%s: unexpected executable path format\n", PROGRAM_NAME);
+        return 1;
+    }
+    /* Prefer the actual exe basename over the compile-time name: a copied/
+     * renamed wrapper must still skip its own unquoted, spaced argv0. */
+    exeDot = wcsrchr(exeStem, L'.');
+    if (exeDot && exeDot != exeStem && _wcsicmp(exeDot, L".exe") == 0)
+        *exeDot = L'\0';
     *lastSlash = L'\0';
 
     if (_snwprintf_s(bashPath, LONG_PATH_CAP, _TRUNCATE,
@@ -279,7 +302,7 @@ int main()
      * for spaced paths is handled by skipping the raw argv0 with
      * skip_argv0 and parsing only the tail; argv[1..] of THAT parse are
      * the real user args. */
-    argTail = skip_argv0(GetCommandLineW(), WRAPPER_BASENAME, WRAPPER_STEM);
+    argTail = skip_argv0(GetCommandLineW(), exeName, exeStem);
     argc = 0;
     argv = NULL;
     if (parse_arg_tail(argTail, &argv, &argc) != 0)
@@ -484,10 +507,9 @@ int main()
         }
     }
 
-    /* Ignore Ctrl-C while waiting; bash shares our console and handles
-     * it itself. (Ctrl-Break is separately ignored only if bash opts in;
-     * most console children die on Ctrl-Break regardless.) */
-    SetConsoleCtrlHandler(NULL, TRUE);
+    /* Ignore Ctrl-C/Ctrl-Break while waiting; bash shares our console and
+     * handles them itself, then the wrapper propagates its exit code. */
+    SetConsoleCtrlHandler(ctrl_handler, TRUE);
     WaitForSingleObject(pi.hProcess, INFINITE);
 
     /* Normal completion: bash is gone, so drop kill-on-close before closing
@@ -505,7 +527,7 @@ int main()
     }
     if (scriptCreated)
         DeleteFileW(scriptPath);
-    SetConsoleCtrlHandler(NULL, FALSE);
+    SetConsoleCtrlHandler(ctrl_handler, FALSE);
 
     if (!GetExitCodeProcess(pi.hProcess, &exitCode))
         exitCode = 1;

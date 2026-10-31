@@ -64,7 +64,7 @@ Each wrapper:
 2. Sets `MSYSTEM` to the appropriate value (`UCRT64`, `CLANG64`, `MSYS`, etc.) and `CHERE_INVOKING=enabled_from_arguments`
 3. Launches `bash --login` in the current console, re-parsing and re-quoting every argument (always double-quoted, so MSYS/Cygwin's parser can't glob `*?[]` or strip `'`/`~`; mid-word backslash runs are emitted doubled because that parser halves `\\` pairs inside double quotes)
 4. Stages a `-c` command longer than MSYS2's ~8K per-argument limit in a temp file, so long heredocs/scripts are not silently truncated
-5. Propagates the exit code; kills `bash` and its descendants if the wrapper itself is killed. On a normal shell exit the kill-on-close job limit is cleared first, so `nohup ... &`, dev servers, and GUI apps started in the background survive (as they do in a normal terminal)
+5. Propagates the exit code; ignores Ctrl-C/Ctrl-Break while waiting so bash can report its own status; kills `bash` and its descendants if the wrapper itself is killed. On a normal shell exit the kill-on-close job limit is cleared first, so `nohup ... &`, dev servers, and GUI apps started in the background survive (as they do in a normal terminal)
 6. Refuses command lines over 32766 content chars (32767 including NUL) with a clear error instead of overflowing; overlong non-`-c` arguments are rejected rather than truncated
 
 Failures write a diagnostic to stderr.
