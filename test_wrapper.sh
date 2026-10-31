@@ -16,6 +16,8 @@ BASH="$MSYS2_ROOT/usr/bin/bash.exe"
 UCRT64="$MSYS2_ROOT/ucrt64_shell_wrapper.exe"
 CLANG64="$MSYS2_ROOT/clang64_shell_wrapper.exe"
 MSYS="$MSYS2_ROOT/msys_shell_wrapper.exe"
+WRAPPER_NAMES=(UCRT64 CLANG64 MSYS)
+WRAPPER_EXES=("$UCRT64" "$CLANG64" "$MSYS")
 
 # Temp dirs created by tests; cleaned up on exit (success or abort).
 GLOB_DIR=""; SPACED_TMP=""; CWD_DIR=""; MISSING_DIR=""; DIRBAIT=""; BG_DIR=""
@@ -155,20 +157,45 @@ else
     fail "CLANG64: PATH missing /clang64/bin"
 fi
 
+result=$("$MSYS" -c 'echo "$PATH"' | tr ':' '\n' | grep -c '/usr/bin' || true)
+if [ "$result" -ge 1 ]; then
+    pass "MSYS: PATH includes /usr/bin"
+else
+    fail "MSYS: PATH missing /usr/bin"
+fi
+
 # ---------------------------------------------------------------------------
 bold "=== Exit codes ==="
 
-# Test 5: exit 0
-"$UCRT64" -c 'exit 0' 2>/dev/null
-[ $? -eq 0 ] && pass "exit 0" || fail "exit 0"
+# Exit-code propagation must match for every environment.
+for _i in 0 1 2; do
+    _name="${WRAPPER_NAMES[$_i]}"
+    _exe="${WRAPPER_EXES[$_i]}"
+    for _code in 0 42 255; do
+        "$_exe" -c "exit $_code" 2>/dev/null
+        _rc=$?
+        if [ "$_rc" -eq "$_code" ]; then
+            pass "exit $_code ($_name)"
+        else
+            fail "exit $_code ($_name): got $_rc"
+        fi
+    done
+done
 
-# Test 6: exit 42
-"$UCRT64" -c 'exit 42' 2>/dev/null
-[ $? -eq 42 ] && pass "exit 42" || fail "exit 42"
+# ---------------------------------------------------------------------------
+bold "=== Wrapper parity ==="
 
-# Test 7: exit 255
-"$UCRT64" -c 'exit 255' 2>/dev/null
-[ $? -eq 255 ] && pass "exit 255" || fail "exit 255"
+# A quoted argument must survive identically through every environment.
+for _i in 0 1 2; do
+    _name="${WRAPPER_NAMES[$_i]}"
+    _exe="${WRAPPER_EXES[$_i]}"
+    result=$("$_exe" -c 'printf "[%s]" "$1"' _ 'a"b' 2>/dev/null)
+    if [ "$result" = '[a"b]' ]; then
+        pass "quoted arg ($_name)"
+    else
+        fail "quoted arg ($_name): got '$result'"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 bold "=== Arguments passthrough ==="
@@ -334,14 +361,21 @@ cat > "$BG_DIR/bg.sh" <<'EOF'
 sleep 2
 echo alive > "$1"
 EOF
-"$UCRT64" -c 'nohup sh "$1" "$2" >/dev/null 2>&1 &' \
-    _ "$BG_DIR/bg.sh" "$BG_DIR/out" 2>/dev/null
+for _i in 0 1 2; do
+    _name="${WRAPPER_NAMES[$_i]}"
+    _exe="${WRAPPER_EXES[$_i]}"
+    "$_exe" -c 'nohup sh "$1" "$2" >/dev/null 2>&1 &' \
+        _ "$BG_DIR/bg.sh" "$BG_DIR/out.$_name" 2>/dev/null
+done
 sleep 4
-if [ "$(cat "$BG_DIR/out" 2>/dev/null)" = "alive" ]; then
-    pass "nohup child survives normal wrapper exit"
-else
-    fail "nohup child was killed on normal wrapper exit"
-fi
+for _i in 0 1 2; do
+    _name="${WRAPPER_NAMES[$_i]}"
+    if [ "$(cat "$BG_DIR/out.$_name" 2>/dev/null)" = "alive" ]; then
+        pass "nohup child survives normal exit ($_name)"
+    else
+        fail "nohup child was killed on normal exit ($_name)"
+    fi
+done
 rm -rf "$BG_DIR"
 BG_DIR=""
 
@@ -354,42 +388,49 @@ LONG_CMD="printf 'BEGIN:%s:%s\n' \"\$0\" \"\$1\"; # $(printf 'a%.0s' {1..8200})
 printf 'SRC=%s\n' \"\${BASH_SOURCE[*]}\"
 case \"\$BASH_EXECUTION_STRING\" in *BEGIN*) printf 'BES=OK\n';; *) printf 'BES=BAD\n';; esac
 printf 'END\n'"
-long_out=$("$UCRT64" -c "$LONG_CMD" long-name long-arg 2>&1)
-if [ "$long_out" = $'BEGIN:long-name:long-arg\nSRC=\nBES=OK\nEND' ]; then
-    pass "long -c command is not truncated and keeps -c semantics"
-else
-    fail "long -c command truncated/mangled: got '$long_out'"
-fi
-
-# The command finder must also handle clustered options (-lc).
-long_lc=$("$UCRT64" -lc "$LONG_CMD" long-name long-arg 2>&1)
-if [ "$long_lc" = $'BEGIN:long-name:long-arg\nSRC=\nBES=OK\nEND' ]; then
-    pass "long -lc command is staged too"
-else
-    fail "long -lc command: got '$long_lc'"
-fi
-
 # eval (not source) means a top-level return fails like it does under -c.
 LONG_RET="return 5
 # $(printf 'a%.0s' {1..8200})"
-"$UCRT64" -c "$LONG_RET" >/dev/null 2>&1
-return_rc=$?
-if [ $return_rc -ne 0 ] && [ $return_rc -ne 5 ]; then
-    pass "long command top-level return matches -c"
-else
-    fail "long command top-level return: rc=$return_rc (source-like 5)"
-fi
-
-# Overlong non-command args can't be transported without changing their
-# position semantics; they must fail loudly rather than truncate.
 LONG_ARG=$(printf 'a%.0s' {1..8187})
-long_err=$("$UCRT64" -c 'printf %s "$1"' _ "$LONG_ARG" 2>&1 1>/dev/null)
-long_rc=$?
-if [ $long_rc -ne 0 ] && echo "$long_err" | grep -q "longer than MSYS2"; then
-    pass "overlong positional arg rejected clearly"
-else
-    fail "overlong positional arg: rc=$long_rc stderr='$long_err'"
-fi
+LONG_EXPECT=$'BEGIN:long-name:long-arg\nSRC=\nBES=OK\nEND'
+
+for _i in 0 1 2; do
+    _name="${WRAPPER_NAMES[$_i]}"
+    _exe="${WRAPPER_EXES[$_i]}"
+
+    long_out=$("$_exe" -c "$LONG_CMD" long-name long-arg 2>&1)
+    if [ "$long_out" = "$LONG_EXPECT" ]; then
+        pass "long -c command keeps -c semantics ($_name)"
+    else
+        fail "long -c command truncated/mangled ($_name): got '$long_out'"
+    fi
+
+    # The command finder must also handle clustered options (-lc).
+    long_lc=$("$_exe" -lc "$LONG_CMD" long-name long-arg 2>&1)
+    if [ "$long_lc" = "$LONG_EXPECT" ]; then
+        pass "long -lc command is staged too ($_name)"
+    else
+        fail "long -lc command ($_name): got '$long_lc'"
+    fi
+
+    "$_exe" -c "$LONG_RET" >/dev/null 2>&1
+    return_rc=$?
+    if [ $return_rc -ne 0 ] && [ $return_rc -ne 5 ]; then
+        pass "long command top-level return matches -c ($_name)"
+    else
+        fail "long command top-level return ($_name): rc=$return_rc (source-like 5)"
+    fi
+
+    # Overlong non-command args can't be transported without changing their
+    # position semantics; they must fail loudly rather than truncate.
+    long_err=$("$_exe" -c 'printf %s "$1"' _ "$LONG_ARG" 2>&1 1>/dev/null)
+    long_rc=$?
+    if [ $long_rc -ne 0 ] && echo "$long_err" | grep -q "longer than MSYS2"; then
+        pass "overlong positional arg rejected clearly ($_name)"
+    else
+        fail "overlong positional arg ($_name): rc=$long_rc stderr='$long_err'"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 bold "=== Error messages ==="

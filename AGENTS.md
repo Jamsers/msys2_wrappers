@@ -33,10 +33,10 @@ Create a 3-line `.c` file following the existing pattern (e.g. `clang64_shell_wr
 
 ```shell
 test_quoting.exe           # quoting.h unit tests: MSYS-tokenizer roundtrip (primary), CTA agreement, argv0/tail parsing
-bash test_wrapper.sh       # integration: env, exit codes, args, background, long commands
+bash test_wrapper.sh       # integration: env, exit codes, args, background, long commands (all 3 wrappers)
 ```
 
-- Integration tests deploy the wrappers next to `$MSYS2_ROOT/usr/bin/bash.exe` (default `/c/msys64`) before running. Deployment is copy-to-`.new` then `mv`, so it works even while a wrapper exe is busy (the normal case when this shell was launched through one). `MSYS2_ROOT` still exists for a scratch tree (copy `usr/bin/bash.exe` in; its DLLs resolve via the real tree's `PATH` entry). `test_wrapper.sh` includes regressions for long `-c` commands and for background children surviving a normal exit.
+- Integration tests deploy the wrappers next to `$MSYS2_ROOT/usr/bin/bash.exe` (default `/c/msys64`) before running. Deployment is copy-to-`.new` then `mv`, so it works even while a wrapper exe is busy (the normal case when this shell was launched through one). `MSYS2_ROOT` still exists for a scratch tree (copy `usr/bin/bash.exe` in; its DLLs resolve via the real tree's `PATH` entry). `test_wrapper.sh` runs the exit-code, quoted-arg, long-command, and background-survival checks against all three wrappers (UCRT64, CLANG64, MSYS); keep them in parity.
 - To extend: `check_passthrough "desc" 'arg'` in `test_wrapper.sh` (compares wrapper vs direct bash and guards against vacuous delivery), `test_roundtrip(L"...", L"label")` in `test_quoting.c`.
 - Quoting logic lives in `quoting.h`, shared by `shell_wrapper.c` and `test_quoting.c` — no manual sync.
 

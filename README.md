@@ -105,7 +105,7 @@ Each binary is ~150KB.
 test_quoting.exe
 
 # Integration tests (env, exit codes, arg passthrough, background survival,
-# long-command transport, error paths)
+# long-command transport, error paths) across UCRT64, CLANG64, and MSYS.
 # Uses /c/msys64 by default; override with MSYS2_ROOT=/path/to/msys64
 bash test_wrapper.sh
 ```
