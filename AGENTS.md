@@ -4,7 +4,7 @@ Tiny `.exe` wrappers that launch MSYS2 `bash --login` with the correct `MSYSTEM`
 
 ## Architecture
 
-Each wrapper is a 3-line `.c` stub (`#define PROGRAM_NAME` + `#define MSYSTEM_VALUE` + `#include "shell_wrapper.c"`). The shared `shell_wrapper.c` finds `<exe_dir>\usr\bin\bash.exe`, sets `MSYSTEM` and `CHERE_INVOKING`, and launches `bash --login` via `CreateProcessW`, skipping argv0 with `skip_argv0` from `quoting.h`, parsing the tail with `parse_arg_tail` (dummy-`x` argv0 prefix, since `CommandLineToArgvW` decodes element 0 with different argv0 grammar; empty tail = zero user args), and re-quoting every arg for bash's parser. Exit code is propagated; a Job Object with kill-on-close ensures bash dies with the wrapper.
+Each wrapper is a 3-line `.c` stub (`#define PROGRAM_NAME` + `#define MSYSTEM_VALUE` + `#include "shell_wrapper.c"`). The shared `shell_wrapper.c` finds `<exe_dir>\usr\bin\bash.exe`, sets `MSYSTEM` and `CHERE_INVOKING`, and launches `bash --login` via `CreateProcessW`, skipping argv0 with `skip_argv0` from `quoting.h`, parsing the tail with `parse_arg_tail` (dummy-`x` argv0 prefix, since `CommandLineToArgvW` decodes element 0 with different argv0 grammar; empty tail = zero user args), and re-quoting every arg for bash's parser. Exit code is propagated. A Job Object with kill-on-close kills bash and its descendants if the wrapper is killed; on normal bash exit the limit is cleared first so `nohup ... &`/background children survive. A `-c` command over MSYS2's 8186-character per-argument cap is staged in `%TEMP%` and evaluated with `eval "$(<file)"` (`MSYS2_WRAPPER_SCRIPT`); overlong non-command args are rejected, never truncated.
 
 Wrappers exist for: `UCRT64`, `CLANG64`, `MSYS`.
 
@@ -33,15 +33,17 @@ Create a 3-line `.c` file following the existing pattern (e.g. `clang64_shell_wr
 
 ```shell
 test_quoting.exe           # quoting.h unit tests: MSYS-tokenizer roundtrip (primary), CTA agreement, argv0/tail parsing
-bash test_wrapper.sh       # integration tests: env, exit codes, arg passthrough
+bash test_wrapper.sh       # integration: env, exit codes, args, background, long commands
 ```
 
-- Integration tests copy the wrappers next to `$MSYS2_ROOT/usr/bin/bash.exe` (default `/c/msys64`) before running. The copy aborts the whole run if a wrapper exe is busy — e.g. the current shell was launched through one. Close those shells, or run against a scratch root: any dir with `usr/bin/bash.exe` copied in (its DLLs resolve via the real tree's `PATH` entry), `MSYS2_ROOT=/path/to/scratch bash test_wrapper.sh`.
+- Integration tests deploy the wrappers next to `$MSYS2_ROOT/usr/bin/bash.exe` (default `/c/msys64`) before running. Deployment is copy-to-`.new` then `mv`, so it works even while a wrapper exe is busy (the normal case when this shell was launched through one). `MSYS2_ROOT` still exists for a scratch tree (copy `usr/bin/bash.exe` in; its DLLs resolve via the real tree's `PATH` entry). `test_wrapper.sh` includes regressions for long `-c` commands and for background children surviving a normal exit.
 - To extend: `check_passthrough "desc" 'arg'` in `test_wrapper.sh` (compares wrapper vs direct bash and guards against vacuous delivery), `test_roundtrip(L"...", L"label")` in `test_quoting.c`.
 - Quoting logic lives in `quoting.h`, shared by `shell_wrapper.c` and `test_quoting.c` — no manual sync.
 
 ## Gotchas
 
 - Never emit bare args from `quoting.h`: MSYS mangles unquoted `*?[]'`, newlines, and `~`. If you touch quoting, run both suites.
+- MSYS2 silently truncates any **single** command-line argument at 8186 chars, regardless of quoting. The wrapper transports overlong `-c` commands via `%TEMP%` + `eval`; do not "fix" a long-command bug by adding more quoting. Overlong positional args must stay a clear error.
+- The Job Object uses kill-on-close only for abnormal wrapper death. `shell_wrapper.c` clears the limit after `WaitForSingleObject` on the normal path; removing that clears the `nohup`/background-survival behavior tested in `test_wrapper.sh`.
 - Known limitation, deliberately unfixed: with a renamed wrapper (argv0 lacks the wrapper name), a *user arg* that is a path ending in the wrapper name is swallowed as argv0 by `skip_argv0`, silently degrading the invocation to a bare login shell. Repro shape: `other.exe -c '...' _ 'C:\fake\ucrt64_shell_wrapper.exe'`.
 - No CI. Always build and run tests locally to verify.

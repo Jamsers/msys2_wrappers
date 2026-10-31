@@ -18,13 +18,14 @@ CLANG64="$MSYS2_ROOT/clang64_shell_wrapper.exe"
 MSYS="$MSYS2_ROOT/msys_shell_wrapper.exe"
 
 # Temp dirs created by tests; cleaned up on exit (success or abort).
-GLOB_DIR=""; SPACED_TMP=""; CWD_DIR=""; MISSING_DIR=""; DIRBAIT=""
+GLOB_DIR=""; SPACED_TMP=""; CWD_DIR=""; MISSING_DIR=""; DIRBAIT=""; BG_DIR=""
 cleanup() {
     [ -n "$GLOB_DIR" ] && rm -rf "$GLOB_DIR"
     [ -n "$SPACED_TMP" ] && rm -rf "$SPACED_TMP"
     [ -n "$CWD_DIR" ] && rmdir "$CWD_DIR" 2>/dev/null
     [ -n "$MISSING_DIR" ] && rm -rf "$MISSING_DIR"
     [ -n "$DIRBAIT" ] && rm -rf "$DIRBAIT"
+    [ -n "$BG_DIR" ] && rm -rf "$BG_DIR"
 }
 trap cleanup EXIT
 
@@ -38,13 +39,15 @@ deploy_failed() {
 }
 
 # Deploy wrappers to where bash lives (they find bash relative to themselves).
-# Checked: never silently test a stale installed copy.
-cp "$WRAPPER_DIR/ucrt64_shell_wrapper.exe" "$MSYS2_ROOT/" \
-    || deploy_failed ucrt64_shell_wrapper.exe
-cp "$WRAPPER_DIR/clang64_shell_wrapper.exe" "$MSYS2_ROOT/" \
-    || deploy_failed clang64_shell_wrapper.exe
-cp "$WRAPPER_DIR/msys_shell_wrapper.exe" "$MSYS2_ROOT/" \
-    || deploy_failed msys_shell_wrapper.exe
+# Checked: never silently test a stale installed copy. Copy-then-rename
+# works even when the installed exe is busy (e.g. this shell runs through it).
+for _w in ucrt64 clang64 msys; do
+    cp "$WRAPPER_DIR/${_w}_shell_wrapper.exe" \
+       "$MSYS2_ROOT/${_w}_shell_wrapper.exe.new" \
+        && mv -f "$MSYS2_ROOT/${_w}_shell_wrapper.exe.new" \
+                 "$MSYS2_ROOT/${_w}_shell_wrapper.exe" \
+        || deploy_failed "${_w}_shell_wrapper.exe"
+done
 
 PASS=0
 FAIL=0
@@ -316,6 +319,75 @@ fi
 popd >/dev/null
 rmdir "$CWD_DIR"
 CWD_DIR=""
+
+# ---------------------------------------------------------------------------
+bold "=== Background processes ==="
+
+# A normal shell exit must not kill nohup'd/background children. The job
+# object is cleared on the normal path; it still kills the tree if the
+# wrapper itself is killed.
+BG_DIR=$(mktemp -d)
+cat > "$BG_DIR/bg.sh" <<'EOF'
+#!/bin/sh
+sleep 2
+echo alive > "$1"
+EOF
+"$UCRT64" -c 'nohup sh "$1" "$2" >/dev/null 2>&1 &' \
+    _ "$BG_DIR/bg.sh" "$BG_DIR/out" 2>/dev/null
+sleep 4
+if [ "$(cat "$BG_DIR/out" 2>/dev/null)" = "alive" ]; then
+    pass "nohup child survives normal wrapper exit"
+else
+    fail "nohup child was killed on normal wrapper exit"
+fi
+rm -rf "$BG_DIR"
+BG_DIR=""
+
+# ---------------------------------------------------------------------------
+bold "=== Long command transport ==="
+
+# MSYS2 truncates a single command-line arg at ~8186 chars. A longer -c
+# command must be staged in a temp file instead of silently truncated.
+LONG_CMD="printf 'BEGIN:%s:%s\n' \"\$0\" \"\$1\"; # $(printf 'a%.0s' {1..8200})
+printf 'SRC=%s\n' \"\${BASH_SOURCE[*]}\"
+case \"\$BASH_EXECUTION_STRING\" in *BEGIN*) printf 'BES=OK\n';; *) printf 'BES=BAD\n';; esac
+printf 'END\n'"
+long_out=$("$UCRT64" -c "$LONG_CMD" long-name long-arg 2>&1)
+if [ "$long_out" = $'BEGIN:long-name:long-arg\nSRC=\nBES=OK\nEND' ]; then
+    pass "long -c command is not truncated and keeps -c semantics"
+else
+    fail "long -c command truncated/mangled: got '$long_out'"
+fi
+
+# The command finder must also handle clustered options (-lc).
+long_lc=$("$UCRT64" -lc "$LONG_CMD" long-name long-arg 2>&1)
+if [ "$long_lc" = $'BEGIN:long-name:long-arg\nSRC=\nBES=OK\nEND' ]; then
+    pass "long -lc command is staged too"
+else
+    fail "long -lc command: got '$long_lc'"
+fi
+
+# eval (not source) means a top-level return fails like it does under -c.
+LONG_RET="return 5
+# $(printf 'a%.0s' {1..8200})"
+"$UCRT64" -c "$LONG_RET" >/dev/null 2>&1
+return_rc=$?
+if [ $return_rc -ne 0 ] && [ $return_rc -ne 5 ]; then
+    pass "long command top-level return matches -c"
+else
+    fail "long command top-level return: rc=$return_rc (source-like 5)"
+fi
+
+# Overlong non-command args can't be transported without changing their
+# position semantics; they must fail loudly rather than truncate.
+LONG_ARG=$(printf 'a%.0s' {1..8187})
+long_err=$("$UCRT64" -c 'printf %s "$1"' _ "$LONG_ARG" 2>&1 1>/dev/null)
+long_rc=$?
+if [ $long_rc -ne 0 ] && echo "$long_err" | grep -q "longer than MSYS2"; then
+    pass "overlong positional arg rejected clearly"
+else
+    fail "overlong positional arg: rc=$long_rc stderr='$long_err'"
+fi
 
 # ---------------------------------------------------------------------------
 bold "=== Error messages ==="

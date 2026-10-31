@@ -1,5 +1,6 @@
 @echo off
 setlocal
+cd /d "%~dp0"
 
 rem If cl is already on PATH (Developer Prompt), skip vcvars. Otherwise try
 rem the standard VS install locations. Override with VCVARS64 env var.

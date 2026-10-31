@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <wchar.h>
+#include <string.h>
 #include "quoting.h"
 
 #ifndef PROGRAM_NAME
@@ -18,8 +20,17 @@
 #define WRAPPER_BASENAME PROGRAM_NAME L".exe"
 #define WRAPPER_STEM PROGRAM_NAME
 
-/* Max command line for CreateProcessW, in chars excluding NUL. */
-#define MAX_CMDLINE 32767
+/* CreateProcessW accepts at most 32767 chars INCLUDING the terminating NUL,
+ * so this is the maximum content length (the last arg check must not allow
+ * need == 32767, which fails with ERROR_FILENAME_EXCED_RANGE). */
+#define MAX_CMDLINE 32766
+/* MSYS2's command-line tokenizer silently truncates a single argument to
+ * 8186 characters (observed on 3.5.x; quoting style does not change it).
+ * Commands longer than this are staged in a temp file by the -c transport
+ * below. Other overlong args are rejected instead of being truncated. */
+#define MSYS_ARG_CAP 8186
+/* Env var used to pass the staged script path to bash. */
+#define MSYS_SCRIPT_ENV L"MSYS2_WRAPPER_SCRIPT"
 /* Long-path buffer (chars including NUL). Handles extended paths. */
 #define LONG_PATH_CAP 32768
 
@@ -70,6 +81,121 @@ static void fail(const wchar_t *fmt, ...)
     err_write(failBuf);
 }
 
+/* MSYS2's 8186 limit counts decoded characters, not UTF-16 code units, so
+ * count surrogate pairs once (an emoji is one character). */
+static size_t arg_char_count(const wchar_t *s)
+{
+    size_t n = 0;
+    for (; *s; s++)
+    {
+        if (*s >= 0xD800 && *s <= 0xDBFF &&
+            s[1] >= 0xDC00 && s[1] <= 0xDFFF)
+            s++;
+        n++;
+    }
+    return n;
+}
+
+/* Index of the -c command argument in argv, or -1. Handles option clusters
+ * (-lc), --rcfile/--init-file FILE, and -o/-O ARG, and stops at -- or the
+ * first non-option (script name / stdin). */
+static int find_command_arg(int argc, wchar_t **argv)
+{
+    int i;
+    for (i = 1; i < argc; i++)
+    {
+        const wchar_t *a = argv[i];
+        const wchar_t *p;
+        if (a[0] != L'-' || a[1] == L'\0')
+            return -1;
+        if (wcscmp(a, L"--") == 0)
+            return -1;
+        if (a[1] == L'-')
+        {
+            if (wcscmp(a, L"--rcfile") == 0 || wcscmp(a, L"--init-file") == 0)
+                i++;
+            continue;
+        }
+        for (p = a + 1; *p; p++)
+        {
+            if (*p == L'c')
+                return (i + 1 < argc) ? i + 1 : -1;
+            if (*p == L'o' || *p == L'O')
+            {
+                if (p[1] == L'\0')
+                    i++; /* option takes the next argument */
+                break;
+            }
+        }
+    }
+    return -1;
+}
+
+/* Stage a command string in a UTF-8 temp file for bash to eval. This
+ * bypasses MSYS2's per-argument truncation. Returns 0 on success, -1 on
+ * failure (temp file removed). The path is converted to forward slashes so
+ * bash can read it directly. */
+static int write_command_file(const wchar_t *cmd, wchar_t *path)
+{
+    wchar_t tempDir[LONG_PATH_CAP];
+    DWORD dirLen;
+    int bytes;
+    char *utf8;
+    HANDLE h;
+    DWORD written = 0;
+    BOOL ok;
+
+    dirLen = GetTempPathW((DWORD)_countof(tempDir), tempDir);
+    if (dirLen == 0 || dirLen >= _countof(tempDir))
+        return -1;
+    if (GetTempFileNameW(tempDir, L"ms2", 0, path) == 0)
+        return -1;
+
+    bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                cmd, -1, NULL, 0, NULL, NULL);
+    if (bytes <= 0)
+    {
+        DeleteFileW(path);
+        return -1;
+    }
+    utf8 = (char *)malloc((size_t)bytes);
+    if (!utf8)
+    {
+        DeleteFileW(path);
+        return -1;
+    }
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                            cmd, -1, utf8, bytes, NULL, NULL) <= 0)
+    {
+        free(utf8);
+        DeleteFileW(path);
+        return -1;
+    }
+
+    h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                    CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        free(utf8);
+        DeleteFileW(path);
+        return -1;
+    }
+    ok = WriteFile(h, utf8, (DWORD)(bytes - 1), &written, NULL) &&
+         written == (DWORD)(bytes - 1);
+    CloseHandle(h);
+    free(utf8);
+    if (!ok)
+    {
+        DeleteFileW(path);
+        return -1;
+    }
+
+    for (wchar_t *q = path; *q; q++)
+        if (*q == L'\\')
+            *q = L'/';
+    return 0;
+}
+
 int main()
 {
     static wchar_t exePath[LONG_PATH_CAP];
@@ -85,6 +211,10 @@ int main()
     size_t need;
     size_t i;
     int argc;
+    int cmdIndex;
+    BOOL scriptCreated = FALSE;
+    wchar_t scriptPath[LONG_PATH_CAP];
+    wchar_t scriptCmd[160];
     LPWSTR *argv;
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
@@ -161,6 +291,59 @@ int main()
     /* argv[0] is the dummy; user args start at argv[1]. argc >= 2 whenever
      * argv is non-NULL (parse_arg_tail frees the dummy-only block). */
 
+    /* MSYS2's tokenizer silently truncates any single argument beyond ~8K
+     * chars. The -c command is the one argument we can route around: stage
+     * it in a temp file and eval it, preserving -c semantics ($0/$@/exit,
+     * empty BASH_SOURCE, top-level return errors, BASH_EXECUTION_STRING). */
+    cmdIndex = find_command_arg(argc, argv);
+    if (cmdIndex > 0 && cmdIndex < argc &&
+        arg_char_count(argv[cmdIndex]) > (size_t)MSYS_ARG_CAP)
+    {
+        if (write_command_file(argv[cmdIndex], scriptPath) != 0)
+        {
+            fail(L"%s: failed to stage long command\n", PROGRAM_NAME);
+            LocalFree(argv);
+            return 1;
+        }
+        if (!SetEnvironmentVariableW(MSYS_SCRIPT_ENV, scriptPath))
+        {
+            DWORD envErr = GetLastError();
+            DeleteFileW(scriptPath);
+            fail(L"%s: failed to set environment (error %lu)\n",
+                 PROGRAM_NAME, envErr);
+            LocalFree(argv);
+            return 1;
+        }
+        if (_snwprintf_s(scriptCmd, _countof(scriptCmd), _TRUNCATE,
+                         L"BASH_EXECUTION_STRING=\"$(<\"$%s\")\"; "
+                         L"builtin eval \"$BASH_EXECUTION_STRING\"",
+                         MSYS_SCRIPT_ENV) < 0)
+        {
+            DeleteFileW(scriptPath);
+            fail(L"%s: internal error staging command\n", PROGRAM_NAME);
+            LocalFree(argv);
+            return 1;
+        }
+        argv[cmdIndex] = scriptCmd;
+        scriptCreated = TRUE;
+    }
+
+    /* Any remaining overlong arg cannot be transported without changing
+     * its position/env semantics, and MSYS2 would silently truncate it. */
+    for (i = 1; i < (size_t)argc; i++)
+    {
+        if (arg_char_count(argv[i]) > (size_t)MSYS_ARG_CAP)
+        {
+            fail(L"%s: argument %zu is longer than MSYS2's %d-character "
+                 L"command-line limit; split it or pass it in a file\n",
+                 PROGRAM_NAME, i, MSYS_ARG_CAP);
+            if (scriptCreated)
+                DeleteFileW(scriptPath);
+            LocalFree(argv);
+            return 1;
+        }
+    }
+
     bashQ = quoted_arg_len(bashPath);
     loginQ = quoted_arg_len(L"--login");
     if (bashQ == (size_t)-1 || loginQ == (size_t)-1 ||
@@ -168,6 +351,8 @@ int main()
         bashQ > (size_t)MAX_CMDLINE - 1 - loginQ)
     {
         fail(L"%s: path too long to quote\n", PROGRAM_NAME);
+        if (scriptCreated)
+            DeleteFileW(scriptPath);
         if (argv)
             LocalFree(argv);
         return 1;
@@ -186,6 +371,8 @@ int main()
         {
             fail(L"%s: command line too long (max %d chars)\n",
                  PROGRAM_NAME, MAX_CMDLINE);
+            if (scriptCreated)
+                DeleteFileW(scriptPath);
             if (argv)
                 LocalFree(argv);
             return 1;
@@ -197,6 +384,8 @@ int main()
     if (!cmdline)
     {
         fail(L"%s: out of memory\n", PROGRAM_NAME);
+        if (scriptCreated)
+            DeleteFileW(scriptPath);
         if (argv)
             LocalFree(argv);
         return 1;
@@ -223,6 +412,8 @@ int main()
     {
         fail(L"%s: internal error building command line\n", PROGRAM_NAME);
         free(cmdline);
+        if (scriptCreated)
+            DeleteFileW(scriptPath);
         if (argv)
             LocalFree(argv);
         return 1;
@@ -260,6 +451,8 @@ int main()
         free(cmdline);
         if (hJob)
             CloseHandle(hJob);
+        if (scriptCreated)
+            DeleteFileW(scriptPath);
         return 1;
     }
     free(cmdline);
@@ -285,6 +478,8 @@ int main()
                 CloseHandle(hJob);
             fail(L"%s: failed to resume %s (error %lu)\n",
                  PROGRAM_NAME, bashPath, err);
+            if (scriptCreated)
+                DeleteFileW(scriptPath);
             return 1;
         }
     }
@@ -294,6 +489,22 @@ int main()
      * most console children die on Ctrl-Break regardless.) */
     SetConsoleCtrlHandler(NULL, TRUE);
     WaitForSingleObject(pi.hProcess, INFINITE);
+
+    /* Normal completion: bash is gone, so drop kill-on-close before closing
+     * the job. That lets intentionally backgrounded children (nohup ... &,
+     * dev servers, GUI apps) outlive the shell, matching a normal terminal.
+     * If the wrapper itself is killed, this path never runs and the job
+     * still tears down bash and its descendants. */
+    if (hJob)
+    {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        ZeroMemory(&jeli, sizeof(jeli));
+        jeli.BasicLimitInformation.LimitFlags = 0;
+        SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
+                                &jeli, sizeof(jeli));
+    }
+    if (scriptCreated)
+        DeleteFileW(scriptPath);
     SetConsoleCtrlHandler(NULL, FALSE);
 
     if (!GetExitCodeProcess(pi.hProcess, &exitCode))

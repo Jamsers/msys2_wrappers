@@ -60,13 +60,18 @@ Add a profile:
 
 Each wrapper:
 
-1. Finds `usr\bin\bash.exe` relative to its own location (long paths supported)
+1. Finds `usr\bin\bash.exe` relative to its own location (32K path buffers; very deep installs still depend on Windows long-path support and MSYS2's own fork handling — no `longPathAware` manifest is embedded)
 2. Sets `MSYSTEM` to the appropriate value (`UCRT64`, `CLANG64`, `MSYS`, etc.) and `CHERE_INVOKING=enabled_from_arguments`
 3. Launches `bash --login` in the current console, re-parsing and re-quoting every argument (always double-quoted, so MSYS/Cygwin's parser can't glob `*?[]` or strip `'`/`~`; mid-word backslash runs are emitted doubled because that parser halves `\\` pairs inside double quotes)
-4. Propagates the exit code; kills `bash` if the wrapper itself is killed
-5. Refuses command lines over 32767 chars with a clear error instead of overflowing
+4. Stages a `-c` command longer than MSYS2's ~8K per-argument limit in a temp file, so long heredocs/scripts are not silently truncated
+5. Propagates the exit code; kills `bash` and its descendants if the wrapper itself is killed. On a normal shell exit the kill-on-close job limit is cleared first, so `nohup ... &`, dev servers, and GUI apps started in the background survive (as they do in a normal terminal)
+6. Refuses command lines over 32766 content chars (32767 including NUL) with a clear error instead of overflowing; overlong non-`-c` arguments are rejected rather than truncated
 
 Failures write a diagnostic to stderr.
+
+### Long commands
+
+MSYS2's command-line tokenizer silently truncates any single argument at 8186 characters (quoting style does not matter). For a `-c` command over that limit the wrapper writes the command to a UTF-8 temp file in `%TEMP%`, sets `MSYS2_WRAPPER_SCRIPT`, restores `BASH_EXECUTION_STRING`, and evals the file; the file is deleted after bash exits. `$0`, `$@`, exit codes, functions, traps, `set -e`, `BASH_SOURCE`, `LINENO`, `BASH_EXECUTION_STRING`, and top-level `return` errors behave as with `-c` (the file read strips trailing newlines). A hard kill of the wrapper before bash exits can leave the temp file behind. Overlong positional arguments cannot be transported that way and fail with a clear error instead of being truncated.
 
 ## Build
 
@@ -99,7 +104,8 @@ Each binary is ~150KB.
 # agreement, argv0 skipping)
 test_quoting.exe
 
-# Integration tests (env, exit codes, arg passthrough, error paths)
+# Integration tests (env, exit codes, arg passthrough, background survival,
+# long-command transport, error paths)
 # Uses /c/msys64 by default; override with MSYS2_ROOT=/path/to/msys64
 bash test_wrapper.sh
 ```
